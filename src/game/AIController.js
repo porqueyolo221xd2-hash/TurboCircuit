@@ -1,0 +1,339 @@
+// IA de los rivales: perfiles distintos, anticipación de curvas, adelantamientos
+// laterales dentro del asfalto y recuperación marcha atrás sin teletransportes.
+// La conducción combina una trazada exterior-vértice-exterior, frenada progresiva
+// y derrapes encadenados con el turbo cuando el perfil lo permite.
+import { angleDiff, clamp, damp } from './utils.js';
+
+const DEFAULT_PROFILE = {
+  lane: 0,
+  lookAheadBias: 0,
+  cornerSpeed: 0.45,
+  cornerCaution: 1,
+  aggression: 0.5,
+  precision: 0.9,
+  mistakeChance: 0.08,
+};
+
+export function computeAIControls(kart, track, context = {}) {
+  const dt = clamp(context.dt ?? 1 / 60, 0.001, 0.05);
+  const karts = context.karts ?? [];
+  const raceTime = context.raceTime ?? 0;
+  const profile = kart.aiProfile ?? DEFAULT_PROFILE;
+  const tuning = context.difficulty ?? null;
+  const aggression = profile.aggression * (tuning?.aggression ?? 1);
+  const precision = profile.precision * (tuning?.precision ?? 1);
+  const mistakeChance = clamp(profile.mistakeChance * (tuning?.mistakeChance ?? 1), 0, 1);
+  const mistakeAmplitude = 0.32 * (tuning?.mistakeAmplitude ?? 1);
+  const lookAheadBias = profile.lookAheadBias + (tuning?.lookAheadBias ?? 0);
+  const cornerSpeed = profile.cornerSpeed * (tuning?.cornerSpeed ?? 1);
+  const cornerCaution = profile.cornerCaution * (tuning?.cornerCaution ?? 1);
+  const anticipation = clamp(tuning?.anticipation ?? 1, 0.75, 1.4);
+  const apexLine = clamp(tuning?.apexLine ?? 0, 0, 1);
+  const driftChance = clamp(tuning?.driftChance ?? 0, 0, 1);
+  const recoveryThreshold = tuning?.recoveryThreshold ?? 1.1;
+  const recoveryTime = tuning?.recoveryTime ?? 1;
+  const halfWidth = track.halfWidth;
+  // Los rivales se quedan lejos del borde: si no, acaban en el césped o el muro.
+  const laneLimit = Math.max(2.6, Math.min(halfWidth - 2.2, 5.4));
+
+  if (kart.aiOvertakeTimer > 0) {
+    kart.aiOvertakeTimer = Math.max(0, kart.aiOvertakeTimer - dt);
+  }
+  if (kart.aiOvertakeCooldown > 0) {
+    kart.aiOvertakeCooldown = Math.max(0, kart.aiOvertakeCooldown - dt);
+  }
+  if (kart.aiMistakeTime > 0) {
+    kart.aiMistakeTime = Math.max(0, kart.aiMistakeTime - dt);
+  }
+  if (kart.aiDriftCooldown > 0) {
+    kart.aiDriftCooldown = Math.max(0, kart.aiDriftCooldown - dt);
+  }
+  kart.aiMistakeCooldown = Math.max(0, kart.aiMistakeCooldown - dt);
+
+  // -------------------------------------------------------------------------
+  // Recuperación: si lleva demasiado tiempo bloqueado, retrocede y se recoloca.
+  // No se mueve la posición a mano ni se regala progreso.
+  // -------------------------------------------------------------------------
+  const offTrack = Math.abs(kart.lateral) > halfWidth + 0.25;
+  const crawling = Math.abs(kart.speed) < 2.2;
+  if (
+    kart.aiRecoveryTime <= 0 &&
+    (kart.stuckTime > recoveryThreshold ||
+      (offTrack && crawling && kart.stuckTime > recoveryThreshold * 0.6))
+  ) {
+    kart.aiRecoveryTime = (0.72 + Math.random() * 0.33) * recoveryTime;
+    kart.stuckTime = 0;
+    kart.aiOvertakeTimer = 0;
+    kart.aiDriftHold = 0;
+  }
+
+  if (kart.aiRecoveryTime > 0) {
+    kart.aiRecoveryTime -= dt;
+    const targetHeading = track.headingAt(kart.trackS + 4);
+    const diff = angleDiff(kart.heading, targetHeading);
+    // Con velocidad negativa el sentido del giro se invierte; por eso el signo
+    // de la dirección es directo respecto al ángulo que falta por corregir.
+    return {
+      throttle: 0,
+      brake: 1,
+      steer: clamp(diff * 1.7, -1, 1),
+      drift: false,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Buscar el rival más cercano por delante (progreso continuo, no distancia).
+  // -------------------------------------------------------------------------
+  let nearestAhead = null;
+  let nearestGap = Infinity;
+  for (const other of karts) {
+    if (other === kart) continue;
+    const gap = other.progress - kart.progress;
+    if (gap > 0.8 && gap < 18 && gap < nearestGap) {
+      nearestGap = gap;
+      nearestAhead = other;
+    }
+  }
+
+  // Iniciar un adelantamiento si hay hueco y el perfil es lo bastante decidido.
+  // La decisión se toma cada cierto tiempo (no en cada fotograma) para que la
+  // agresividad marque una diferencia real entre dificultades.
+  if (
+    kart.aiOvertakeTimer <= 0 &&
+    nearestAhead &&
+    nearestGap < 12 + clamp(aggression, 0, 1.4) * 5 &&
+    kart.aiOvertakeCooldown <= 0
+  ) {
+    kart.aiOvertakeCooldown = 0.55 + Math.random() * 0.55;
+    const lateralGap = nearestAhead.lateral - kart.lateral;
+    if (Math.abs(lateralGap) < 3.4) {
+      // Se pasa por el lado contrario al que ocupa el rival, si hay sitio.
+      let side = nearestAhead.lateral <= 0.2 ? 1 : -1;
+      const roomRight = laneLimit - nearestAhead.lateral;
+      const roomLeft = laneLimit + nearestAhead.lateral;
+      if ((side > 0 ? roomRight : roomLeft) < 2.6) side = -side;
+
+      const offset = 3.1 + clamp(aggression, 0, 1.3) * 0.5;
+      const candidate = clamp(
+        nearestAhead.lateral + side * offset,
+        -laneLimit,
+        laneLimit,
+      );
+      const laneBusy = karts.some(
+        (other) =>
+          other !== kart &&
+          other !== nearestAhead &&
+          Math.abs(other.progress - kart.progress) < 4.5 &&
+          Math.abs(other.lateral - candidate) < 2.1,
+      );
+      const chance = clamp(0.34 + aggression * 0.6, 0.2, 0.98);
+      if (!laneBusy && Math.random() < chance) {
+        kart.aiOvertakeSide = side;
+        kart.aiOvertakeLane = candidate;
+        kart.aiOvertakeTimer = 1.6 + Math.random() * 1.2;
+      }
+    }
+  }
+
+  if (kart.aiOvertakeTimer > 0 && nearestAhead && nearestGap < 22) {
+    kart.aiOvertakeLane = clamp(
+      nearestAhead.lateral + kart.aiOvertakeSide * (3.1 + clamp(aggression, 0, 1.3) * 0.5),
+      -laneLimit,
+      laneLimit,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Curvatura próxima. Las tres ventanas miden cuánto gira el trazado delante
+  // y permiten frenar antes de entrar, no dentro de la curva.
+  // -------------------------------------------------------------------------
+  const s = kart.trackS;
+  const bendBetween = (near, far) =>
+    Math.abs(
+      angleDiff(
+        track.headingAt(s + near * anticipation),
+        track.headingAt(s + far * anticipation),
+      ),
+    );
+  const nearBend = bendBetween(4, 18);
+  const midBend = bendBetween(15, 31);
+  const farBend = bendBetween(28, 46);
+  const bend = Math.max(nearBend, midBend, farBend);
+  const severity = clamp(bend / 0.9, 0, 1);
+
+  // -------------------------------------------------------------------------
+  // Carril objetivo: base con vaivén suave, adelantamiento o trazada de curva.
+  // -------------------------------------------------------------------------
+  let cornerDir = 0;
+  if (Math.abs(kart.speed) > 6 && severity > 0.06) {
+    cornerDir = Math.sign(
+      angleDiff(
+        track.headingAt(s + 4 * anticipation),
+        track.headingAt(s + 18 * anticipation),
+      ),
+    );
+    if (cornerDir === 0) {
+      cornerDir = Math.sign(
+        angleDiff(
+          track.headingAt(s + 18 * anticipation),
+          track.headingAt(s + 34 * anticipation),
+        ),
+      );
+    }
+  }
+
+  const weave = Math.sin(raceTime * 0.28 + kart.aiPhase) * 0.34;
+  let targetLane = clamp(kart.aiLaneBase + weave, -laneLimit, laneLimit);
+
+  if (Math.abs(kart.lateral) > halfWidth - 0.3) {
+    // Fuera del asfalto: vuelve hacia el centro sin cruzar la pista de golpe.
+    targetLane = clamp(kart.lateral * 0.2, -2.6, 2.6);
+  } else if (kart.aiOvertakeTimer > 0) {
+    targetLane = clamp(kart.aiOvertakeLane, -laneLimit, laneLimit);
+  } else if (cornerDir !== 0) {
+    const inside = -cornerDir;
+    const strength = clamp(severity / 0.65, 0, 1) * apexLine * laneLimit;
+    let line = inside * strength * 0.88;
+
+    // Entrada ancha: si la curva fuerte todavía está delante, se abre.
+    const entry = clamp((farBend - nearBend) / 0.28, 0, 1);
+    if (entry > 0.15) line -= inside * strength * 0.55 * entry;
+
+    // Salida ancha: cuando el vértice ya queda atrás, deja correr el kart.
+    const exit = clamp((nearBend - farBend) / 0.3, 0, 1);
+    if (exit > 0.2) line -= inside * strength * 0.4 * exit;
+
+    targetLane = clamp(targetLane + line, -laneLimit, laneLimit);
+  }
+
+  kart.aiLaneCurrent = damp(kart.aiLaneCurrent, targetLane, 2.8, dt);
+
+  // -------------------------------------------------------------------------
+  // Velocidad objetivo. Se tiene en cuenta el turbo y el IMPULSO activos para
+  // no frenar justo cuando el kart acaba de ganar velocidad punta.
+  // -------------------------------------------------------------------------
+  const boost = Math.max(
+    kart.turboActive ? kart.turboPower : 0,
+    kart.itemBoostTime > 0 ? kart.itemBoostPower : 0,
+  );
+  const slow = kart.slowTime > 0 ? kart.slowFactor : 1;
+  const pace = kart.speedBias * kart.paceFactor;
+  const maxSpeed = kart.maxSpeed * pace * (1 + boost) * slow;
+
+  let targetSpeed = maxSpeed * clamp(1 - cornerSpeed * severity * cornerCaution, 0.24, 1);
+  targetSpeed = Math.max(maxSpeed * (tuning?.minCornerFactor ?? 0.34), targetSpeed);
+
+  if (kart.onGrass) targetSpeed *= 0.72;
+  if (kart.finished) targetSpeed *= 0.6;
+
+  // No empotrarse contra el kart que va justo delante si aún no hay hueco.
+  if (nearestAhead && nearestGap < 7) {
+    const lateralGap = Math.abs(kart.aiLaneCurrent - nearestAhead.lateral);
+    if (lateralGap < 2) {
+      const keep = clamp(0.88 + aggression * 0.08, 0.9, 0.995);
+      targetSpeed = Math.min(
+        targetSpeed,
+        Math.max(6, Math.abs(nearestAhead.speed) * keep),
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Errores ocasionales: pequeños y recuperables, nunca un volantazo permanente.
+  // -------------------------------------------------------------------------
+  if (kart.aiMistakeCooldown <= 0) {
+    kart.aiMistakeCooldown = 6 + Math.random() * 8;
+    if (
+      Math.random() < mistakeChance &&
+      Math.abs(kart.lateral) < halfWidth - 1.8
+    ) {
+      kart.aiMistakeTime = 0.35 + Math.random() * 0.4;
+    }
+  }
+  let mistakeSteer = 0;
+  if (kart.aiMistakeTime > 0) {
+    mistakeSteer = Math.sin(raceTime * 12 + kart.aiPhase) * mistakeAmplitude;
+    targetSpeed *= 0.9;
+  }
+
+  // -------------------------------------------------------------------------
+  // Derrape de la IA: empieza con una probabilidad propia del perfil, se
+  // mantiene mientras dure la curva y se suelta al salir para cobrar el turbo.
+  // -------------------------------------------------------------------------
+  const speedAbs = Math.abs(kart.speed);
+  let drift = false;
+  const driftAllowed =
+    driftChance > 0 &&
+    !kart.onGrass &&
+    !kart.wallContact &&
+    speedAbs > 13 &&
+    Math.abs(kart.lateral) < halfWidth - 1.5 &&
+    kart.aiMistakeTime <= 0;
+
+  if (kart.aiDriftHold > 0) {
+    kart.aiDriftHold = Math.max(0, kart.aiDriftHold - dt);
+    if (driftAllowed && severity > 0.3 && kart.aiDriftHold > 0) {
+      drift = true;
+    } else {
+      kart.aiDriftHold = 0;
+      kart.aiDriftCooldown = Math.max(
+        kart.aiDriftCooldown,
+        2 + Math.random() * 1.6,
+      );
+    }
+  } else if (driftAllowed && severity > 0.44 && kart.aiDriftCooldown <= 0) {
+    if (Math.random() < driftChance) {
+      // La IA mantiene el derrape el tiempo suficiente para cargar turbo;
+      // lo suelta al abrirse la curva o si pierde el control.
+      kart.aiDriftHold = 2.6 + severity * 1.4;
+      kart.aiDriftCooldown = 3.2 + Math.random() * 2.4;
+      drift = true;
+    } else {
+      kart.aiDriftCooldown = 0.7 + Math.random() * 1.1;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Dirección: persecución pura de un punto del trazado en el carril actual.
+  // -------------------------------------------------------------------------
+  let lookAhead = 9.5 + Math.min(16, speedAbs * 0.58) + lookAheadBias;
+  if (kart.onGrass) lookAhead = Math.min(lookAhead, 11);
+
+  const aim = track.posAt(s + lookAhead, kart.aiLaneCurrent);
+  const dx = aim.x - kart.position.x;
+  const dz = aim.z - kart.position.z;
+  const desiredHeading = Math.atan2(dx, dz);
+  const diff = angleDiff(kart.heading, desiredHeading);
+  let steer = clamp(
+    -diff * (2.7 + precision * 1.15) + mistakeSteer,
+    -1,
+    1,
+  );
+  // Durante el derrape se añade un poco de volante hacia el interior: con el
+  // giro extra del derrape, el kart necesita una entrada decidida para cargar
+  // el turbo, igual que haría un piloto humano.
+  if (drift && cornerDir !== 0) {
+    steer = clamp(
+      steer * 0.15 - cornerDir * (0.28 + severity * 0.04),
+      -1,
+      1,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Acelerador y freno. Se mantiene el gas cuando la diferencia es pequeña y
+  // solo se frena de verdad si el kart llega pasado a la curva.
+  // -------------------------------------------------------------------------
+  const error = targetSpeed - speedAbs;
+  let throttle = 0;
+  let brake = 0;
+  if (error >= -0.5) {
+    throttle = 1;
+  } else if (error >= -2) {
+    brake = clamp(-error / 8, 0, 0.25);
+  } else {
+    brake = clamp((-error - 1.5) / 8, 0.25, 1);
+  }
+
+  return { throttle, brake, steer, drift };
+}

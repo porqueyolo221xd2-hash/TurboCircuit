@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#081225" />
+    <meta
+      name="description"
+      content="Turbo Circuit: carrera de karts arcade 3D en el navegador, con personajes y circuitos originales."
+    />
+    <title>Turbo Circuit — Carrera arcade 3D</title>
+  </head>
+  <body>
+    <main id="app">
+      <div id="scene" aria-hidden="true"></div>
+      <div id="speed-fx" class="speed-fx" aria-hidden="true"></div>
+      <div id="impact-fx" class="impact-fx" aria-hidden="true"></div>
+
+      <!-- ===================== HUD ===================== -->
+      <section id="hud" class="hud hidden" aria-label="Información de carrera">
+        <div class="hud-top">
+          <div class="stat-card lap-card">
+            <span class="label">VUELTA</span>
+            <span class="value"><span id="hud-lap">1</span><small id="hud-lap-total">/3</small></span>
+          </div>
+
+          <div class="stat-card pos-card">
+            <span class="label">POSICIÓN</span>
+            <span class="value"><span id="hud-position">4</span><small>º</small></span>
+          </div>
+
+          <div class="stat-card time-card">
+            <span class="label">TIEMPO TOTAL</span>
+            <span class="value mono" id="hud-time">00:00.000</span>
+            <span class="sub">Mejor vuelta <b id="hud-best" class="mono">—</b></span>
+          </div>
+
+          <div class="hud-actions">
+            <span id="hud-difficulty" class="difficulty-hud" title="Dificultad">NORMAL</span>
+            <button id="btn-sound" class="icon-btn" type="button" aria-label="Activar o desactivar sonido" title="Sonido (M)">
+              🔊
+            </button>
+            <button id="btn-pause" class="icon-btn" type="button" aria-label="Pausar carrera" title="Pausa (P)">
+              ⏸
+            </button>
+          </div>
+        </div>
+
+        <div class="hud-bottom">
+          <div class="minimap-card">
+            <canvas id="minimap" width="336" height="336" aria-hidden="true"></canvas>
+            <span class="map-label" id="hud-map-name">PISTA</span>
+          </div>
+
+          <div class="lap-time-card">
+            <span class="label">VUELTA ACTUAL</span>
+            <span class="value mono" id="hud-lap-time">0:00.000</span>
+          </div>
+
+          <div class="speedo-card">
+            <span class="label">VELOCIDAD</span>
+            <div class="speed-value"><span id="hud-speed">0</span><small>km/h</small></div>
+            <div class="speed-bar"><i id="hud-speed-bar"></i></div>
+            <div class="turbo-meter" id="turbo-meter">
+              <span class="turbo-label">TURBO <b id="turbo-state">ESPACIO</b></span>
+              <div class="turbo-bar">
+                <i id="turbo-bar-fill"></i>
+                <span class="turbo-mark mark-1"></span>
+                <span class="turbo-mark mark-2"></span>
+              </div>
+            </div>
+            <div class="item-slot" id="item-card">
+              <span class="item-icon" id="item-icon">—</span>
+              <span class="item-copy">
+                <b id="item-name">Sin objeto</b>
+                <small id="item-state">Recoge una caja</small>
+              </span>
+              <kbd>E</kbd>
+            </div>
+          </div>
+        </div>
+
+        <div id="offroad" class="offroad">¡FUERA DE PISTA!</div>
+
+        <div id="controls-hint" class="controls-hint">
+          <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> o flechas
+          <span class="sep">·</span> <kbd>Espacio</kbd> derrape/turbo
+          <span class="sep">·</span> <kbd>P</kbd> pausa <span class="sep">·</span> <kbd>M</kbd> sonido
+        </div>
+      </section>
+
+      <!-- ===================== MENÚ ===================== -->
+      <section id="screen-menu" class="overlay menu-overlay">
+        <div class="menu-panel">
+          <div class="checker-strip"></div>
+          <p class="eyebrow">CARRERA ARCADE 3D</p>
+          <h1 class="game-title"><span class="title-a">TURBO</span><span class="title-b">CIRCUIT</span></h1>
+          <p class="tagline">Cuatro karts. Tres circuitos. Tres vueltas. Una sola línea de meta.</p>
+
+          <div class="menu-layout">
+            <div class="menu-column">
+              <div class="setup-block">
+                <div class="setup-head">
+                  <h2>CIRCUITO</h2>
+                  <span id="map-current" class="setup-current">COSTA TROPICAL</span>
+                </div>
+                <div class="map-options" id="map-options" role="group" aria-label="Elegir circuito">
+                  <button class="map-btn" type="button" data-map="coast" aria-pressed="false">
+                    <span class="map-dot" style="--map-color: #2fd7e8"></span>
+                    <span class="map-copy"><b>COSTA TROPICAL</b><small>Curvas amplias junto al mar</small></span>
+                  </button>
+                  <button class="map-btn" type="button" data-map="mountain" aria-pressed="false">
+                    <span class="map-dot" style="--map-color: #9be36b"></span>
+                    <span class="map-copy"><b>MONTAÑA</b><small>Trazado técnico entre pinos</small></span>
+                  </button>
+                  <button class="map-btn" type="button" data-map="city" aria-pressed="false">
+                    <span class="map-dot" style="--map-color: #b66cff"></span>
+                    <span class="map-copy"><b>CIUDAD FUTURISTA</b><small>Neón, rectas y curvas rápidas</small></span>
+                  </button>
+                </div>
+                <p class="setup-desc" id="map-desc">
+                  Un circuito abierto y rápido entre palmeras y agua.
+                </p>
+              </div>
+
+              <div class="difficulty-block">
+                <div class="difficulty-head">
+                  <h2>DIFICULTAD</h2>
+                  <span id="difficulty-current" class="difficulty-current">NORMAL</span>
+                </div>
+                <div
+                  class="difficulty-options"
+                  id="difficulty-options"
+                  role="group"
+                  aria-label="Seleccionar dificultad"
+                >
+                  <button class="difficulty-btn" type="button" data-difficulty="easy" aria-pressed="false">
+                    FÁCIL
+                  </button>
+                  <button class="difficulty-btn" type="button" data-difficulty="normal" aria-pressed="false">
+                    NORMAL
+                  </button>
+                  <button class="difficulty-btn" type="button" data-difficulty="hard" aria-pressed="false">
+                    DIFÍCIL
+                  </button>
+                </div>
+                <p class="difficulty-desc" id="difficulty-desc">
+                  Ritmo equilibrado, adelantamientos razonables y uso moderado de objetos.
+                </p>
+              </div>
+            </div>
+
+            <div class="menu-column">
+              <div class="setup-block kart-setup">
+                <div class="setup-head">
+                  <h2>TU KART</h2>
+                  <span id="kart-current" class="setup-current">RAYO</span>
+                </div>
+                <div class="kart-stage">
+                  <canvas
+                    id="kart-preview"
+                    class="kart-preview"
+                    width="420"
+                    height="260"
+                    aria-label="Vista previa 3D del kart seleccionado"
+                  ></canvas>
+                  <div class="kart-stage-copy">
+                    <b id="kart-tagline">El equilibrado</b>
+                    <small id="kart-desc">Rápido, noble y fácil de leer.</small>
+                  </div>
+                </div>
+                <div class="kart-nav">
+                  <button id="btn-kart-prev" class="kart-arrow" type="button" aria-label="Kart anterior">
+                    ◀
+                  </button>
+                  <div class="kart-options" id="kart-options" role="group" aria-label="Elegir kart">
+                    <button class="kart-btn" type="button" data-kart="rayo" aria-pressed="false">
+                      <i style="--kart-color: #ff6a1a"></i>RAYO
+                    </button>
+                    <button class="kart-btn" type="button" data-kart="centella" aria-pressed="false">
+                      <i style="--kart-color: #ff3d6e"></i>CENTELLA
+                    </button>
+                    <button class="kart-btn" type="button" data-kart="lira" aria-pressed="false">
+                      <i style="--kart-color: #2fe0a4"></i>LIRA
+                    </button>
+                    <button class="kart-btn" type="button" data-kart="titan" aria-pressed="false">
+                      <i style="--kart-color: #4b6fff"></i>TITÁN
+                    </button>
+                  </div>
+                  <button id="btn-kart-next" class="kart-arrow" type="button" aria-label="Kart siguiente">
+                    ▶
+                  </button>
+                </div>
+                <div class="kart-stats">
+                  <div class="kart-stat">
+                    <span>Velocidad</span>
+                    <i class="stat-bar"><b data-stat="speed"></b></i>
+                  </div>
+                  <div class="kart-stat">
+                    <span>Aceleración</span>
+                    <i class="stat-bar"><b data-stat="acceleration"></b></i>
+                  </div>
+                  <div class="kart-stat">
+                    <span>Agarre</span>
+                    <i class="stat-bar"><b data-stat="grip"></b></i>
+                  </div>
+                  <div class="kart-stat">
+                    <span>Estabilidad</span>
+                    <i class="stat-bar"><b data-stat="stability"></b></i>
+                  </div>
+                </div>
+              </div>
+
+              <div class="menu-grid">
+                <div class="menu-block">
+                  <h2>CONTROLES</h2>
+                  <ul class="control-list">
+                    <li><span><kbd>WASD</kbd> / <kbd>flechas</kbd></span> Acelerar, frenar y girar</li>
+                    <li><span><kbd>Espacio</kbd></span> Derrapar; al soltar, turbo</li>
+                    <li><span><kbd>E</kbd></span> Usar objeto</li>
+                    <li><span><kbd>P</kbd> / <kbd>Esc</kbd> · <kbd>M</kbd></span> Pausa / sonido</li>
+                  </ul>
+                </div>
+
+                <div class="menu-block">
+                  <h2>CÓMO GANAR</h2>
+                  <p class="small">
+                    Sal de la última posición y adelanta a <b>Vega</b>, <b>Nilo</b> y
+                    <b>Musgo</b>.
+                  </p>
+                  <ul class="tips">
+                    <li>Derrapa en las curvas para cargar turbo.</li>
+                    <li>Recoge cajas y usa el objeto con <kbd>E</kbd>.</li>
+                    <li>El césped y los muros te frenan.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="menu-actions">
+            <button id="btn-start" class="btn btn-primary" type="button">
+              Empezar carrera <span class="btn-icon">▶</span>
+            </button>
+            <p class="footnote">Pulsa <kbd>Enter</kbd> o el botón. Para conducir necesitas el teclado.</p>
+          </div>
+          <div class="checker-strip bottom"></div>
+        </div>
+      </section>
+
+      <!-- ===================== CUENTA ATRÁS ===================== -->
+      <div id="countdown" class="countdown hidden" aria-live="assertive">
+        <div class="countdown-ring"><span id="countdown-value">3</span></div>
+      </div>
+
+      <!-- ===================== PAUSA ===================== -->
+      <section id="screen-pause" class="overlay hidden">
+        <div class="panel small-panel">
+          <p class="eyebrow">PAUSA</p>
+          <h2 class="panel-title">Carrera en pausa</h2>
+          <p class="panel-text">El cronómetro está detenido. Tómate un respiro.</p>
+          <div class="button-row">
+            <button id="btn-resume" class="btn btn-primary" type="button">Reanudar</button>
+            <button id="btn-restart" class="btn btn-secondary" type="button">Reiniciar</button>
+          </div>
+          <p class="footnote">Pulsa <kbd>P</kbd> o <kbd>Esc</kbd> para reanudar.</p>
+        </div>
+      </section>
+
+      <!-- ===================== RESULTADOS ===================== -->
+      <section id="screen-results" class="overlay hidden">
+        <div class="panel results-panel">
+          <p class="eyebrow">RESULTADO FINAL · 3 VUELTAS</p>
+          <h2 class="panel-title" id="results-title">¡Carrera terminada!</h2>
+
+          <div class="result-hero">
+            <span id="results-position" class="big-position">1º</span>
+            <span id="results-stars" class="stars">★★★</span>
+          </div>
+
+          <table class="results-table">
+            <thead>
+              <tr><th>#</th><th>Piloto</th><th>Tiempo</th></tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+
+          <p class="panel-text" id="results-note"></p>
+
+          <div class="button-row">
+            <button id="btn-again" class="btn btn-primary" type="button">Volver a jugar</button>
+            <button id="btn-menu" class="btn btn-secondary" type="button">Menú</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== ERROR WEBGL ===================== -->
+      <section id="webgl-error" class="overlay hidden">
+        <div class="panel small-panel">
+          <p class="eyebrow">PROBLEMA</p>
+          <h2 class="panel-title">No se ha podido iniciar el juego</h2>
+          <p class="panel-text" id="webgl-error-text">
+            Tu navegador no ha podido crear un contexto WebGL. Prueba con una versión reciente de
+            Chrome, Edge o Firefox y comprueba que la aceleración por hardware está activada.
+          </p>
+          <p class="footnote">Puedes ver los detalles en la consola del navegador (F12).</p>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
