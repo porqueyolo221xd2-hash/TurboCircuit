@@ -76,12 +76,31 @@ export class Game {
   // Inicialización
   // ---------------------------------------------------------------------------
 
+  isTouchDevice() {
+    return document.documentElement.classList.contains('is-touch');
+  }
+
+  /**
+   * Resolución de renderizado adaptativa: mantiene nitidez en ordenador y
+   * limita el número de píxeles en móviles para no castigar la GPU/batería.
+   */
+  getRenderPixelRatio() {
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(1, this.container.clientWidth);
+    const height = Math.max(1, this.container.clientHeight);
+    const touch = this.isTouchDevice();
+    const maxRatio = touch ? 1.5 : 2;
+    const pixelBudget = touch ? 1_600_000 : 16_000_000;
+    const budgetRatio = Math.sqrt(pixelBudget / (width * height));
+    return Math.max(0.75, Math.min(dpr, maxRatio, budgetRatio));
+  }
+
   initRenderer() {
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       powerPreference: 'high-performance',
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.setPixelRatio(this.getRenderPixelRatio());
     this.renderer.setSize(
       Math.max(1, this.container.clientWidth),
       Math.max(1, this.container.clientHeight),
@@ -99,8 +118,9 @@ export class Game {
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(0xcfeaff, 260, 950);
 
+    this.baseFov = CONFIG.camera.fov;
     this.camera = new THREE.PerspectiveCamera(
-      CONFIG.camera.fov,
+      this.baseFov,
       Math.max(1, this.container.clientWidth) / Math.max(1, this.container.clientHeight),
       0.1,
       2500,
@@ -158,7 +178,9 @@ export class Game {
 
     this.sun = new THREE.DirectionalLight(0xfff0c8, 2.5);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
+    // Sombras algo más ligeras en táctil: se nota menos en pantalla pequeña.
+    const shadowSize = this.isTouchDevice() ? 1024 : 2048;
+    this.sun.shadow.mapSize.set(shadowSize, shadowSize);
     this.sun.shadow.camera.near = 10;
     this.sun.shadow.camera.far = 300;
     this.sun.shadow.camera.left = -75;
@@ -321,8 +343,24 @@ export class Game {
       }
     };
 
+    // El botón táctil de objeto comparte la mecánica de la tecla E.
+    this.input.onTouchAction = (action) => {
+      if (action === 'item' && this.state === 'racing') {
+        this.itemSystem.useItem(this.playerKart);
+      }
+    };
+
     this.handleResize = () => this.resize();
     listen(window, 'resize', this.handleResize);
+    // iOS/Android a veces terminan de recolocar la vista después del evento.
+    this.handleOrientationChange = () => {
+      this.resize();
+      window.requestAnimationFrame(() => this.resize());
+    };
+    listen(window, 'orientationchange', this.handleOrientationChange);
+    if (window.visualViewport) {
+      listen(window.visualViewport, 'resize', this.handleResize);
+    }
 
     if ('ResizeObserver' in window) {
       this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -345,9 +383,13 @@ export class Game {
     if (this.disposed || !this.renderer) return;
     const width = Math.max(1, this.container.clientWidth);
     const height = Math.max(1, this.container.clientHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const aspect = width / height;
+    this.renderer.setPixelRatio(this.getRenderPixelRatio());
     this.renderer.setSize(width, height);
-    this.camera.aspect = width / height;
+    this.camera.aspect = aspect;
+    // En vertical se abre algo el campo de visión para no perder los laterales.
+    this.baseFov = CONFIG.camera.fov + clamp((1 - aspect) * 16, 0, 10);
+    this.camera.fov = this.baseFov;
     this.camera.updateProjectionMatrix();
   }
 
@@ -451,6 +493,9 @@ export class Game {
   }
 
   startRace({ snapCamera = false } = {}) {
+    // Se limpia antes de recolocar los karts: así un derrape mantenido durante
+    // la cuenta atrás no queda bloqueado por el cancelDrift del reinicio.
+    this.input.clear();
     this.resetRace();
     this.itemSystem.setDifficulty(this.difficulty);
     for (const kart of this.karts) {
@@ -460,7 +505,6 @@ export class Game {
     this.countdownRemaining = CONFIG.countdownStep * 3;
     this.countdownValue = 3;
     this.snapCamera = snapCamera;
-    this.input.clear();
     this.ui.hideMenu();
     this.ui.hideResults();
     this.ui.showPause(false);
@@ -635,6 +679,7 @@ export class Game {
     if (this.state !== 'racing') return;
     this.state = 'finished';
     this.playerKart.finished = true;
+    this.ui.hideCountdown();
     this.audio.stopEngine();
     this.audio.finishJingle();
     this.input.clear();
@@ -763,7 +808,7 @@ export class Game {
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLook);
 
-    const targetFov = CONFIG.camera.fov + speedRatio * 7;
+    const targetFov = this.baseFov + speedRatio * 7;
     if (Math.abs(this.camera.fov - targetFov) > 0.02) {
       this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-dt * 3));
       this.camera.updateProjectionMatrix();

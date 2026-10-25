@@ -61,12 +61,28 @@ http://localhost:5173/
 
 Para parar el servidor, pulsa `Ctrl + C` en la terminal.
 
+Para probar en un móvil conectado a la misma red Wi-Fi, arranca el servidor aceptando conexiones
+externas:
+
+```powershell
+npm.cmd run dev -- --host
+```
+
+La terminal mostrará una dirección `Network` similar a `http://192.168.1.40:5173/`. Ábrela en el
+navegador del móvil. Si no carga, revisa que el firewall de Windows permita Node.js en redes
+privadas. Para una prueba realista conviene publicar la build (ver sección 7) y abrirla por `https`.
+
 En el menú puedes elegir **circuito** (COSTA TROPICAL, MONTAÑA o CIUDAD FUTURISTA), **kart**
 (Rayo, Centella, Lira o Titán) y **dificultad** antes de empezar. La vista previa 3D del kart se
 actualiza al instante. Las tres elecciones se guardan en `localStorage` y se recuperan en la próxima
 visita; si el navegador las bloquea, el juego usa valores seguros por defecto.
 
 ### Controles
+
+El juego se puede conducir con teclado o con pantalla táctil. En ordenador se mantiene el control
+clásico; en móviles y tabletas aparecen botones en pantalla.
+
+**Teclado y ratón**
 
 | Acción | Teclas |
 | --- | --- |
@@ -80,7 +96,34 @@ visita; si el navegador las bloquea, el juego usa valores seguros por defecto.
 | Silenciar sonido | `M` |
 | Empezar (en el menú) | `Enter` |
 
-El juego se conduce únicamente con el teclado. Los botones de la interfaz se pueden pulsar con el ratón.
+Los botones de la interfaz se pueden pulsar con el ratón.
+
+**Pantalla táctil**
+
+| Botón | Acción |
+| --- | --- |
+| `◀` / `▶` | Girar a la izquierda o a la derecha |
+| `▲ GAS` | Acelerar |
+| `▼ FRENO` | Frenar o marcha atrás |
+| `⟲ DRIFT` | Mantener para derrapar; soltar para liberar el turbo |
+| `OBJETO` | Usar el objeto recogido (equivale a `E`) |
+
+Los controles táctiles se activan solos cuando el navegador informa de un puntero grueso sin hover
+(móvil o tableta). Los botones mantienen la acción mientras el dedo está apoyado, se liberan al
+soltar y admiten varios dedos a la vez, de modo que se puede acelerar y girar al mismo tiempo. La
+escena y los botones de conducción bloquean el desplazamiento y el zoom accidental de la página.
+
+En carrera se recomienda el móvil en **horizontal**. Si se gira a vertical, aparece un aviso
+discreto que no bloquea la partida ni fuerza la orientación. El HUD, el minimapa, el velocímetro y
+las pantallas de menú, pausa y resultados respetan las áreas seguras del dispositivo (muesca y barra
+de gestos).
+
+Para forzar o desactivar la interfaz táctil al depurar desde el ordenador:
+
+```text
+http://localhost:5173/?touch=1   interfaz táctil forzada
+http://localhost:5173/?touch=0   interfaz de teclado forzada
+```
 
 ---
 
@@ -153,13 +196,13 @@ Actions ya aplica `VITE_BASE=/TurboCircuit/` automáticamente; no hay que editar
   anticipación, trazada al vértice y derrape controlado para encadenar turbo, además de
   adelantamientos y recuperación más rápidos y mejor gestión de objetos. Vega, Nilo y Musgo
   conservan su personalidad en los tres niveles.
-- Derrape arcade: mantén `Espacio` mientras giras para deslizar el kart. La carga del turbo exige
-  velocidad, asfalto y giro real; mantener la tecla en recta no carga nada. Hay dos niveles
-  (turbo corto y turbo potente), con barra en el HUD, llamas en los escapes, líneas de velocidad y
-  un sonido breve. Un mismo derrape solo puede generar una activación.
+- Derrape arcade: mantén `Espacio` (o el botón `DRIFT` en táctil) mientras giras para deslizar el
+  kart. La carga del turbo exige velocidad, asfalto y giro real; mantener la tecla en recta no carga
+  nada. Hay dos niveles (turbo corto y turbo potente), con barra en el HUD, llamas en los escapes,
+  líneas de velocidad y un sonido breve. Un mismo derrape solo puede generar una activación.
 - Cajas de objetos visibles que desaparecen al recogerse y reaparecen a los pocos segundos. Los
-  cuatro karts pueden recoger y usar objetos; el jugador lo hace con `E` y ve el objeto equipado en
-  el HUD. Objetos originales:
+  cuatro karts pueden recoger y usar objetos; el jugador lo hace con `E` o con el botón `OBJETO` en
+  pantalla táctil, y ve el objeto equipado en el HUD. Objetos originales:
   - **IMPULSO**: aceleración extra temporal.
   - **PULSO**: onda expansiva que ralentiza brevemente a los karts cercanos.
   - **BARRERA**: reduce la intensidad y duración de los efectos negativos.
@@ -175,7 +218,12 @@ Actions ya aplica `VITE_BASE=/TurboCircuit/` automáticamente; no hay que editar
   muestran como "En carrera") y botón para volver a jugar.
 - Pausa manual (botón o tecla) y pausa automática al cambiar de pestaña. La pausa congela karts,
   derrapes, turbos y efectos temporales.
-- Interfaz adaptable al tamaño de la ventana.
+- Interfaz adaptable al tamaño de la ventana y a la pantalla táctil: controles en pantalla con
+  multitáctil, HUD compacto, menú corto en horizontal, aviso de orientación no bloqueante y
+  respeto de las áreas seguras (muesca y barra de gestos).
+- Renderizado adaptativo: el juego limita la resolución interna en móviles para cuidar GPU y
+  batería, reduce las sombras y ajusta el campo de visión al cambiar de orientación sin recrear la
+  escena ni los materiales.
 - Sonido generado con WebAudio (motor, pitidos, turbo, recogida de objetos y melodía final) sin
   archivos externos.
 
@@ -196,8 +244,8 @@ Turbo Circuit/
 ├─ .gitignore
 ├─ README.md
 └─ src/
-   ├─ main.js                 Punto de entrada y captura de errores WebGL
-   ├─ style.css               Estilos arcade y diseño responsive
+   ├─ main.js                 Punto de entrada, detección táctil y captura de errores WebGL
+   ├─ style.css               Estilos arcade, diseño responsive y controles táctiles
    └─ game/
       ├─ Game.js              Escena, estados, carrera, cámara y bucle principal
       ├─ Track.js             Pista compartida y decoración según el mapa
@@ -209,7 +257,7 @@ Turbo Circuit/
       ├─ ItemSystem.js        Cajas, objetos, ondas, proyectiles y decisiones de la IA
       ├─ items.js             Definición de IMPULSO, PULSO, BARRERA y PULSO DE IMPACTO
       ├─ difficulty.js        Perfiles FÁCIL/NORMAL/DIFÍCIL y persistencia validada
-      ├─ Input.js             Entrada de teclado
+      ├─ Input.js             Entrada de teclado y táctil (Pointer Events, multitáctil)
       ├─ Audio.js             Sonidos con WebAudio
       ├─ UI.js                Pantallas, HUD, turbo, objeto, minimapa y selectores
       ├─ config.js            Ajustes de juego
@@ -317,6 +365,12 @@ Netlify no hay que cambiar nada.
   funciona en <https://get.webgl.org/>. El juego muestra un aviso si no puede crear la escena.
 - **El ordenador va lento**: cierra otras pestañas con 3D. Las sombras están activadas por defecto y se
   adaptan a la zona del jugador; en equipos modestos el juego sigue funcionando, aunque con menos FPS.
+- **No aparecen los controles táctiles en el móvil**: comprueba que la página se carga por `https`
+  o `localhost` y prueba a añadir `?touch=1` a la URL. Si aparecen con `?touch=1` pero no sin él, el
+  navegador no está informando de un puntero táctil (ocurre en algunos emuladores).
+- **Los botones táctiles no responden o se queda una acción pulsada**: toca fuera del botón, pausa y
+  reanuda, o recarga la página. Al perder el foco, cambiar de pestaña o pausar, el juego libera todos
+  los controles y cancela el derrape en curso.
 - **El sonido no arranca hasta pulsar un botón**: es una norma de los navegadores. Pulsa **Empezar
   carrera** y el audio se activa.
 
@@ -364,7 +418,29 @@ Netlify no hay que cambiar nada.
   el contenido que no cabe se alcanza con scroll sin quedar oculto bajo el botón.
 - La interacción de los selectores, el guardado en `localStorage` y el arranque de la carrera ya se
   comprobaron en Chromium en una pasada anterior sobre 800 × 620. Las capturas nuevas validan la
-  composición responsive, no la interacción táctil.
+  composición responsive.
+- **Verificación táctil en Chromium** sobre la compilación de producción, con viewports reales
+  simulados dentro de un iframe de 390 × 844 (vertical) y 844 × 390 (horizontal):
+  - Menú, carrera, pausa y resultados caben sin desbordamiento horizontal; en horizontal los
+    resultados se compactaron hasta dejar visibles los botones **Volver a jugar** y **Menú**.
+  - Multitáctil con Pointer Events: acelerar y girar a la vez, liberar un dedo sin perder el otro,
+    soltar todo y reiniciar el estado táctil al empezar una carrera nueva.
+  - Derrape táctil: con giro y velocidad suficiente se activa `driftActive` y sube `driftCharge`;
+    al salir al césped se cancela sin regalar turbo, igual que con teclado.
+  - Botón **OBJETO**: consume un `IMPULSO` equipado y activa el impulso, reutilizando la mecánica
+    de la tecla `E`.
+  - Pausa y reanudación desde los botones táctiles, reinicio con **Reiniciar** y vuelta al menú con
+    **Menú**, sin dejar controles pulsados ni efectos activos.
+  - Selección táctil de circuito, kart y dificultad: se actualiza el estado del juego y se guarda en
+    `localStorage` (`turbo-circuit-map-v1`, `turbo-circuit-kart-v1`,
+    `turbo-circuit-difficulty-v1`).
+  - Áreas seguras simuladas (`--safe-top: 47px`, `--safe-bottom: 34px`): el minimapa y el
+    velocímetro quedan por debajo del HUD superior sin solaparse, y los botones no invaden la barra
+    de gestos.
+  - Cambio de orientación en caliente (390 × 844 → 844 × 390): el renderizador se redimensiona, el
+    `aspect` pasa a 2,16, el FOV vuelve a 62 y no hay overflow, sin recrear la escena.
+  - Escritorio a 800 × 620: los controles táctiles y el aviso de orientación permanecen ocultos, la
+    lista de teclado se muestra y `WASD` sigue funcionando. `?touch=0` fuerza ese modo de interfaz.
 - **No se ha verificado a fondo en navegador** la conducción manual, el aspecto de los tres
   circuitos en carrera, el cambio visual entre los cuatro karts (solo se comprobó Rayo y Centella)
   ni el diseño en móviles físicos. Las pruebas de partida completa en Chromium, pausa, cambio de
@@ -377,8 +453,10 @@ Netlify no hay que cambiar nada.
   encuadre de la cámara cenital del menú y legibilidad del minimapa de cada mapa.
 - Funcionamiento visual de la vista previa 3D del kart, cambio entre los cuatro modelos y ajuste del
   canvas en ventanas estrechas.
-- Interacción táctil y zoom real del navegador en móviles; la composición ya está validada con
-  capturas de 360 a 1280 px, pero no en un dispositivo físico.
+- Prueba en un móvil o tableta físicos (Android/iPhone): latencia real del táctil, zoom y scroll del
+  navegador, gestos del sistema, muesca y barra de gestos reales y rendimiento de la GPU. La lógica
+  multitáctil y la composición sí se validaron en Chromium con viewports simulados de 390 × 844 y
+  844 × 390, pero no en hardware real.
 - Sensación real de conducción, derrape y turbo con teclado (incluida la dificultad para alcanzar
   el nivel 2 en curvas cortas).
 - Aspecto visual de las llamas, líneas de velocidad, cajas, onda de PULSO, burbuja de BARRERA,
@@ -388,12 +466,14 @@ Netlify no hay que cambiar nada.
   terminar.
 - Que `Espacio` y `E` no activen botones de la interfaz y que el foco se comporte bien tras usar los
   botones de pausa, menú y resultados.
-- Repetición de carreras desde **Volver a jugar** y **Reiniciar**, pausa en mitad de un derrape,
-  turbo o proyectil, y cambio de pestaña con un objeto activo.
+- Pausa en mitad de un derrape, turbo o proyectil, y cambio de pestaña con un objeto activo. Los
+  botones **Volver a jugar**, **Reiniciar** y **Menú** sí se recorrieron en Chromium, pero no con
+  efectos a medias.
 - Equilibrio real de la dificultad: que FÁCIL permita aprender y ganar, NORMAL compita y DIFÍCIL
   exija una buena conducción sin resultar injusto.
 - Calidad subjetiva del audio nuevo (turbo, disparo, impacto, recogida y uso de objetos).
 
-No se ha probado en Firefox, Safari ni en dispositivos físicos (móviles o tablets). Si encuentras un
-fallo, abre la consola (F12), copia el mensaje de error y revisa primero la sección de problemas
-frecuentes.
+No se ha probado en Firefox, Safari ni en dispositivos físicos (móviles o tablets), así que la
+experiencia táctil real (latencia, gestos del sistema y muescas) sigue pendiente de validación en
+hardware. Si encuentras un fallo, abre la consola (F12), copia el mensaje de error y revisa primero
+la sección de problemas frecuentes.

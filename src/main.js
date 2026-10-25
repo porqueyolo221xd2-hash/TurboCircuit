@@ -1,6 +1,24 @@
 import './style.css';
 import { Game } from './game/Game.js';
 
+/**
+ * Los controles táctiles solo se muestran en dispositivos de puntero grueso
+ * (móviles/tabletas). `?touch=1` y `?touch=0` permiten forzarlos al depurar.
+ */
+function detectTouchDevice() {
+  const forced = new URLSearchParams(window.location.search).get('touch');
+  if (forced === '1') return true;
+  if (forced === '0') return false;
+
+  const coarse = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
+  const noHover = window.matchMedia?.('(hover: none)')?.matches ?? false;
+  return coarse || (navigator.maxTouchPoints > 0 && noHover);
+}
+
+if (detectTouchDevice()) {
+  document.documentElement.classList.add('is-touch');
+}
+
 const container = document.getElementById('scene');
 const errorScreen = document.getElementById('webgl-error');
 const errorText = document.getElementById('webgl-error-text');

@@ -58,8 +58,11 @@ export class UI {
       kartNext: byId('btn-kart-next'),
       kartPreview: byId('kart-preview'),
       statBars: Array.from(document.querySelectorAll('[data-stat]')),
+      touchItem: byId('touch-item'),
+      touchItemIcon: byId('touch-item-icon'),
     };
 
+    this.isTouch = document.documentElement.classList.contains('is-touch');
     this.textCache = new Map();
     this.impactTimer = null;
     this.mapSize = 168;
@@ -286,7 +289,7 @@ export class UI {
     meter.classList.toggle('active', Boolean(turboActive));
     this.setSpeedFx(boosting);
 
-    let state = 'ESPACIO';
+    let state = this.isTouch ? 'DRIFT' : 'ESPACIO';
     if (turboActive) state = turboLevel >= 2 ? '¡POTENTE!' : '¡CORTO!';
     else if (charge >= level2) state = '¡MÁXIMO!';
     else if (charge >= level1) state = 'LISTO';
@@ -305,13 +308,32 @@ export class UI {
       card.style.setProperty('--item-color', item.color);
       this.setText(this.el.itemIcon, item.icon);
       this.setText(this.el.itemName, item.name);
-      this.setText(this.el.itemState, cooldown > 0 ? 'Recargando…' : item.useHint ?? 'Pulsa E para usar');
+      this.setText(this.el.itemState, cooldown > 0 ? 'Recargando…' : this.getItemHint(item));
     } else {
       card.style.setProperty('--item-color', '#5c7695');
       this.setText(this.el.itemIcon, '—');
       this.setText(this.el.itemName, 'Sin objeto');
       this.setText(this.el.itemState, cooldown > 0 ? 'Recargando…' : 'Recoge una caja');
     }
+
+    const touchItem = this.el.touchItem;
+    if (touchItem) {
+      touchItem.classList.toggle('has-item', Boolean(item));
+      touchItem.classList.toggle('cooling', !item && cooldown > 0 && cooldownMax > 0);
+      touchItem.style.setProperty('--item-color', item ? item.color : '#5c7695');
+      this.setText(this.el.touchItemIcon, item ? item.icon : '—');
+      const label = item
+        ? `Usar ${item.name.toLowerCase()}: toca el botón`
+        : 'Usar objeto: sin objeto';
+      touchItem.setAttribute('aria-label', label);
+      touchItem.title = label;
+    }
+  }
+
+  getItemHint(item) {
+    const hint = item.useHint ?? 'Pulsa E para usar';
+    if (!this.isTouch) return hint;
+    return hint.replace(/Pulsa E/gi, 'Toca OBJETO');
   }
 
   setSound(enabled) {
