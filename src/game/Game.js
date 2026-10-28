@@ -7,23 +7,40 @@ import { DIFFICULTIES, isDifficulty, loadDifficulty, saveDifficulty } from './di
 import { Input } from './Input.js';
 import { ItemSystem } from './ItemSystem.js';
 import { ITEMS } from './items.js';
-import { AI_KARTS, PLAYER_KARTS, getKart, loadKartId, saveKartId } from './karts.js';
+import { AI_KARTS, PLAYER_KARTS, getKart } from './karts.js';
 import { Kart } from './Kart.js';
 import { KartPreview } from './KartPreview.js';
-import { getMap, loadMapId, saveMapId } from './maps.js';
+import { getMap } from './maps.js';
 import { Track } from './Track.js';
 import { UI } from './UI.js';
 import { clamp, formatTime } from './utils.js';
+import {
+  coinsFor,
+  grantCoins,
+  loadProgress,
+  ownsKart,
+  ownsMap,
+  purchase,
+  saveProgress,
+  selectKart,
+  selectMap,
+} from './economy.js';
+import { Shop } from './Shop.js';
 
 export class Game {
   constructor(container) {
     this.container = container;
     this.difficultyId = loadDifficulty();
     this.difficulty = DIFFICULTIES[this.difficultyId];
-    this.mapId = loadMapId();
-    this.map = getMap(this.mapId);
-    this.kartId = loadKartId();
+    // Perfil persistente: una sola fuente de verdad para monedas y desbloqueos.
+    // loadProgress migra (sin borrar) las claves antiguas de kart y circuito.
+    this.progress = loadProgress();
+    this.kartId = this.progress.selectedKart;
     this.kartSpec = getKart(this.kartId);
+    this.mapId = this.progress.selectedMap;
+    this.map = getMap(this.mapId);
+    saveProgress(this.progress);
+    this.rewardClaimed = false;
     this.ui = new UI();
     this.input = new Input();
     this.audio = new AudioManager();
@@ -55,6 +72,12 @@ export class Game {
     this.createItemSystem();
     this.preview = null;
     this.createPreview();
+    this.shop = new Shop({
+      onBuy: (kind, id) => this.buyItem(kind, id),
+      onSelect: (kind, id) => this.selectItem(kind, id),
+      onClose: () => this.closeShop(),
+    });
+    this.shop.setProgress(this.progress);
     this.resetRace();
     this.bindEvents();
     this.updateMenuCamera(0);
@@ -67,6 +90,7 @@ export class Game {
     this.ui.setDifficulty(this.difficultyId, this.difficulty);
     this.ui.setMap(this.mapId, this.map);
     this.ui.setKart(this.kartId, this.kartSpec);
+    this.ui.setProgress(this.progress);
 
     this.animate = this.animate.bind(this);
     this.rafId = requestAnimationFrame(this.animate);
@@ -237,19 +261,32 @@ export class Game {
     this.itemSystem.onSlow = (kart) => {
       if (kart === this.playerKart) this.audio.beep(150, 0.2, 0.08);
     };
-    this.itemSystem.onProjectileFired = (kart) => {
+    this.itemSystem.onProjectileFired = (kart, projectile) => {
       // El disparo del jugador ya suena en onUse; la IA solo se oye si está cerca.
       if (kart === this.playerKart) return;
       const dx = kart.position.x - this.playerKart.position.x;
       const dz = kart.position.z - this.playerKart.position.z;
-      if (dx * dx + dz * dz < 32 * 32) this.audio.projectile(0.55);
+      if (dx * dx + dz * dz < 32 * 32) {
+        if (projectile?.kind === 'FURIA') this.audio.furia(0.55);
+        else this.audio.projectile(0.55);
+      }
     };
-    this.itemSystem.onProjectileHit = (victim, shooter, blocked) => {
+    this.itemSystem.onProjectileHit = (victim, shooter, blocked, projectile) => {
       if (victim === this.playerKart) {
-        this.ui.flashImpact(blocked);
+        this.ui.flashImpact(blocked, projectile?.kind === 'FURIA');
         this.audio.impact(blocked);
+        if (!blocked && (projectile?.def?.stunTime ?? 0) > 0) this.audio.stun();
       } else if (shooter === this.playerKart) {
         this.audio.impact(false);
+      }
+    };
+    this.itemSystem.onMineTriggered = (owner, affected, triggeredBy, x, z) => {
+      const playerHit = affected.some((kart) => kart === this.playerKart);
+      if (playerHit) this.ui.flashImpact(false, true);
+      const dx = x - this.playerKart.position.x;
+      const dz = z - this.playerKart.position.z;
+      if (playerHit || owner === this.playerKart || dx * dx + dz * dz < 40 * 40) {
+        this.audio.mineBoom();
       }
     };
   }
@@ -301,6 +338,9 @@ export class Game {
       else if (this.state === 'paused') this.resume();
     });
     listen(this.ui.el.soundButton, 'click', () => this.toggleSound());
+    if (this.ui.el.shopButton) {
+      listen(this.ui.el.shopButton, 'click', () => this.openShop());
+    }
     for (const button of this.ui.el.difficultyButtons ?? []) {
       listen(button, 'click', () => this.setDifficulty(button.dataset.difficulty));
     }
@@ -319,6 +359,14 @@ export class Game {
 
     this.input.onAction = (code, event) => {
       if (event.repeat) return;
+      // Con la tienda abierta el teclado no puede arrancar la carrera.
+      if (this.shop?.isOpen) {
+        if (code === 'Escape') {
+          event.preventDefault();
+          this.closeShop();
+        }
+        return;
+      }
       if (code === 'Enter') {
         if (this.state === 'menu') {
           event.preventDefault();
@@ -411,12 +459,24 @@ export class Game {
 
   /** Cambia de circuito desde el menú: recrea pista, objetos y parrilla. */
   setMap(id) {
-    if (this.state !== 'menu') return;
+    if (this.state !== 'menu' || this.shop?.isOpen) return;
     const map = getMap(id);
+    if (!map || map.id === this.mapId) return;
+    // El contenido bloqueado no se puede elegir: lleva a la tienda.
+    if (!ownsMap(this.progress, map.id)) {
+      this.openShop('maps', map.id);
+      return;
+    }
+    if (!selectMap(this.progress, map.id)) return;
+    this.persistProgress();
+    this.applyMap(map);
+  }
+
+  /** Reconstruye la pista y la parrilla para el circuito indicado. */
+  applyMap(map) {
     if (!map || map.id === this.mapId) return;
     this.mapId = map.id;
     this.map = map;
-    saveMapId(map.id);
 
     this.input.clear();
     for (const kart of this.karts) kart.clearTransientState();
@@ -441,12 +501,23 @@ export class Game {
 
   /** Cambia el kart del jugador desde el menú y guarda la elección. */
   setKart(id) {
-    if (this.state !== 'menu') return;
+    if (this.state !== 'menu' || this.shop?.isOpen) return;
     const spec = getKart(id);
+    if (!spec || spec.id === this.kartId) return;
+    if (!ownsKart(this.progress, spec.id)) {
+      this.openShop('karts', spec.id);
+      return;
+    }
+    if (!selectKart(this.progress, spec.id)) return;
+    this.persistProgress();
+    this.applyKart(spec);
+  }
+
+  /** Recoloca el modelo del jugador y actualiza la ficha del menú. */
+  applyKart(spec) {
     if (!spec || spec.id === this.kartId) return;
     this.kartId = spec.id;
     this.kartSpec = spec;
-    saveKartId(spec.id);
 
     this.rebuildPlayerKart();
     this.ui.setKart(this.kartId, this.kartSpec);
@@ -457,10 +528,99 @@ export class Game {
 
   /** Navegación circular con las flechas del selector de kart. */
   cycleKart(direction) {
-    if (this.state !== 'menu') return;
-    const index = PLAYER_KARTS.findIndex((kart) => kart.id === this.kartId);
-    const next = (index + direction + PLAYER_KARTS.length) % PLAYER_KARTS.length;
-    this.setKart(PLAYER_KARTS[next].id);
+    if (this.state !== 'menu' || this.shop?.isOpen) return;
+    const owned = PLAYER_KARTS.filter((kart) => ownsKart(this.progress, kart.id));
+    if (owned.length < 2) return;
+    const index = owned.findIndex((kart) => kart.id === this.kartId);
+    const next = (index + direction + owned.length) % owned.length;
+    this.setKart(owned[next].id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tienda y progreso
+  // ---------------------------------------------------------------------------
+
+  /** Refresca saldo, bloqueos y tarjetas tras cualquier cambio de perfil. */
+  persistProgress() {
+    const ok = saveProgress(this.progress);
+    this.ui.setProgress(this.progress);
+    this.shop?.setProgress(this.progress);
+    this.shop?.renderGrid();
+    return ok;
+  }
+
+  openShop(tab = 'karts', focusId = null) {
+    if (this.state !== 'menu' || !this.shop) return;
+    this.input.clear();
+    this.shop.setProgress(this.progress);
+    this.shop.open(tab, focusId);
+  }
+
+  closeShop() {
+    if (!this.shop) return;
+    this.shop.close();
+    this.shop.setProgress(this.progress);
+    this.ui.setProgress(this.progress);
+  }
+
+  /**
+   * Compra un kart o un circuito. Si el navegador no puede guardar, se
+   * deshace la compra en memoria para no fingir que se ha completado.
+   */
+  buyItem(kind, id) {
+    if (!this.progress) return { ok: false };
+    const backup = JSON.parse(JSON.stringify(this.progress));
+    const result = purchase(this.progress, kind, id);
+    if (!result.ok) {
+      this.shop?.note(result.reason, 'error');
+      return result;
+    }
+    if (!saveProgress(this.progress)) {
+      this.progress = backup;
+      this.shop?.setProgress(this.progress);
+      this.ui.setProgress(this.progress);
+      this.shop?.renderGrid();
+      this.shop?.note('No se pudo guardar la compra. No se ha cobrado nada.', 'error');
+      return { ok: false, reason: 'save-failed' };
+    }
+
+    const name = kind === 'kart' ? getKart(id).name : getMap(id).name;
+    this.ui.setProgress(this.progress);
+    this.shop?.setProgress(this.progress);
+    this.shop?.renderGrid();
+    this.shop?.selectPreview(id);
+    this.shop?.note(`¡${name} desbloqueado! Ya puedes equiparlo.`, 'ok');
+    return result;
+  }
+
+  /** Equipa contenido desbloqueado. Nunca permite seleccionar un bloqueo. */
+  selectItem(kind, id) {
+    if (!this.progress) return false;
+    const backup = JSON.parse(JSON.stringify(this.progress));
+    const ok = kind === 'kart' ? selectKart(this.progress, id) : selectMap(this.progress, id);
+    if (!ok) {
+      this.shop?.note('Ese objeto todavía está bloqueado.', 'error');
+      return false;
+    }
+    if (!saveProgress(this.progress)) {
+      this.progress = backup;
+      this.shop?.setProgress(this.progress);
+      this.ui.setProgress(this.progress);
+      this.shop?.renderGrid();
+      this.shop?.note('No se pudo guardar la selección. Inténtalo de nuevo.', 'error');
+      return false;
+    }
+
+    if (kind === 'kart') this.applyKart(getKart(id));
+    else this.applyMap(getMap(id));
+
+    this.ui.setProgress(this.progress);
+    this.shop?.setProgress(this.progress);
+    this.shop?.renderGrid();
+    this.shop?.selectPreview(id);
+    const name = kind === 'kart' ? getKart(id).name : getMap(id).name;
+    this.shop?.note(`${name} equipado.`, 'ok');
+    return true;
   }
 
   // ---------------------------------------------------------------------------
@@ -496,6 +656,11 @@ export class Game {
     // Se limpia antes de recolocar los karts: así un derrape mantenido durante
     // la cuenta atrás no queda bloqueado por el cancelDrift del reinicio.
     this.input.clear();
+    if (this.shop?.isOpen) this.closeShop();
+    // Red de seguridad: nunca se corre con contenido que no esté desbloqueado.
+    if (!ownsKart(this.progress, this.kartId)) this.applyKart(getKart(this.progress.selectedKart));
+    if (!ownsMap(this.progress, this.mapId)) this.applyMap(getMap(this.progress.selectedMap));
+    this.rewardClaimed = false;
     this.resetRace();
     this.itemSystem.setDifficulty(this.difficulty);
     for (const kart of this.karts) {
@@ -542,6 +707,7 @@ export class Game {
 
   updateRace(dt) {
     this.raceTime += dt;
+    if (this.track) this.track.updateFeatures(dt, this.raceTime);
 
     if (this.goTimer > 0) {
       this.goTimer -= dt;
@@ -574,6 +740,7 @@ export class Game {
       kart.step(dt, controls, this.track, this.raceTime);
     }
 
+    this.applyTrackFeatures(dt);
     this.resolveCollisions();
     this.itemSystem.update(dt, this.karts);
     this.updateStandings();
@@ -582,6 +749,111 @@ export class Game {
     this.audio.setEngine(Math.abs(player.speed) / player.maxSpeed, player.onGrass);
 
     if (player.finished) this.finishRace();
+  }
+
+  /**
+   * Mecánicas de mapa: placas de turbo, rampas con salto y obstáculos móviles.
+   * Se aplican después de mover los karts para usar su proyección más reciente.
+   */
+  applyTrackFeatures(dt) {
+    const features = this.track?.features;
+    if (!features) return;
+
+    for (const kart of this.karts) {
+      this.applyBoostPads(kart, features.boostPads);
+      this.applyRamps(kart, features.ramps);
+      this.applyObstacles(kart, features.obstacles);
+      kart.group.position.set(kart.position.x, 0.02 + kart.height, kart.position.z);
+
+      if (kart.isPlayer && kart.justLanded) {
+        this.audio.beep(180, 0.09, 0.055, 'triangle');
+        kart.justLanded = false;
+      }
+    }
+  }
+
+  applyBoostPads(kart, pads) {
+    if (!pads || pads.length === 0 || kart.finished) return;
+    for (const pad of pads) {
+      const delta = Math.abs(this.track.wrapDelta(kart.trackS - pad.s));
+      if (delta > pad.length / 2 + 0.8) continue;
+      if (Math.abs(kart.lateral - pad.lateral) > pad.width / 2 + 0.55) continue;
+      if ((kart.featureCooldowns.get(pad.id) ?? 0) > this.raceTime) continue;
+
+      kart.featureCooldowns.set(pad.id, this.raceTime + 1.1);
+      kart.applyItemBoost(pad.def.power ?? 0.26, pad.def.duration ?? 0.5);
+      if (kart.isPlayer) {
+        this.ui.flashBoost?.();
+        this.audio.turbo(1);
+      }
+    }
+  }
+
+  applyRamps(kart, ramps) {
+    if (!ramps || ramps.length === 0 || kart.finished) return;
+    const onRamp = this.track.rampAt(kart);
+
+    if (onRamp && !kart.airborne) {
+      kart.setRampHeight(onRamp.height);
+      return;
+    }
+
+    if (!kart.airborne && kart.rampHeight > 0.3) {
+      if (kart.speed > 5) {
+        const launch =
+          CONFIG.air.launchBase +
+          Math.min(34, Math.max(0, kart.speed)) * CONFIG.air.launchPerSpeed +
+          kart.rampHeight * 0.1;
+        kart.startJump(launch);
+        if (kart.isPlayer) {
+          this.ui.flashLaunch();
+          this.audio.turbo(1);
+        }
+      } else {
+        kart.setRampHeight(0);
+      }
+    } else if (!kart.airborne) {
+      kart.setRampHeight(0);
+    }
+  }
+
+  applyObstacles(kart, obstacles) {
+    if (!obstacles || obstacles.length === 0 || kart.finished) return;
+    for (const obstacle of obstacles) {
+      const delta = Math.abs(this.track.wrapDelta(kart.trackS - obstacle.s));
+      if (delta > obstacle.depth / 2 + 1.15) continue;
+      if (Math.abs(kart.lateral - obstacle.lateral) > obstacle.width / 2 + 0.95) continue;
+      if (kart.height > obstacle.height + 0.35) continue;
+      if ((kart.featureCooldowns.get(obstacle.id) ?? 0) > this.raceTime) continue;
+
+      kart.featureCooldowns.set(obstacle.id, this.raceTime + 1.25);
+      const side = Math.sign(kart.lateral - obstacle.lateral) || 1;
+      const blocked = !kart.applyImpact(
+        {
+          slowFactor: obstacle.kind === 'platform' ? 0.68 : 0.56,
+          slowDuration: obstacle.kind === 'platform' ? 0.65 : 0.95,
+          controlDuration: obstacle.kind === 'gate' ? 0.5 : 0.35,
+          controlStrength: obstacle.kind === 'gate' ? 0.5 : 0.38,
+          impactSpeedLoss: obstacle.kind === 'platform' ? 0.9 : 0.84,
+        },
+        side,
+      );
+
+      const projection = this.track.project(kart.position);
+      const push = obstacle.kind === 'boulder' ? 0.95 : 0.7;
+      kart.position.x += projection.sx * side * push;
+      kart.position.z += projection.sz * side * push;
+      kart.lateral += side * push;
+      if (obstacle.kind === 'gate') {
+        kart.position.x -= projection.tx * 0.35;
+        kart.position.z -= projection.tz * 0.35;
+      }
+
+      if (kart.isPlayer) {
+        this.ui.flashImpact(!blocked, obstacle.kind === 'boulder');
+        this.audio.impact(!blocked);
+      }
+    }
   }
 
   resolveCollisions() {
@@ -621,7 +893,7 @@ export class Game {
         kart.position.x = projection.centerX + projection.sx * limit * side;
         kart.position.z = projection.centerZ + projection.sz * limit * side;
       }
-      kart.group.position.set(kart.position.x, 0.02, kart.position.z);
+      kart.group.position.set(kart.position.x, 0.02 + (kart.height ?? 0), kart.position.z);
     }
   }
 
@@ -673,6 +945,16 @@ export class Game {
       cooldown: player.itemUseCooldown,
       cooldownMax: 0.7,
     });
+
+    const stunRatio =
+      player.stunDuration > 0
+        ? 1 - clamp(player.stunTime / player.stunDuration, 0, 1)
+        : 0;
+    this.ui.updateStun({
+      active: player.stunTime > 0,
+      ratio: stunRatio,
+      recovering: player.stunTime > 0 && stunRatio > 0.55,
+    });
   }
 
   finishRace() {
@@ -688,6 +970,27 @@ export class Game {
     this.updateStandings();
 
     const position = this.getPlayerPosition();
+
+    // Recompensa única por carrera: solo paga la victoria y nunca dos veces.
+    let coins = 0;
+    let saveOk = true;
+    if (!this.rewardClaimed) {
+      this.rewardClaimed = true;
+      const backup = JSON.parse(JSON.stringify(this.progress));
+      this.progress.stats.races += 1;
+      if (position === 1) {
+        coins = coinsFor(this.difficultyId);
+        grantCoins(this.progress, coins);
+        this.progress.stats.wins += 1;
+      }
+      if (!saveProgress(this.progress)) {
+        // Si no se puede guardar, no se muestra un saldo que se perdería.
+        this.progress = backup;
+        coins = 0;
+        saveOk = false;
+      }
+    }
+
     const rows = this.standings.map((kart, index) => ({
       position: index + 1,
       name: kart.name,
@@ -699,16 +1002,29 @@ export class Game {
 
     const totalTime = this.playerKart.finishTime ?? this.raceTime;
     const bestLap = this.playerKart.bestLapTime;
-    const note =
+    let note =
       `Has completado las ${CONFIG.laps} vueltas en ${formatTime(totalTime)}.` +
       (bestLap ? ` Tu mejor vuelta fue ${formatTime(bestLap)}.` : '') +
       (position === 1 ? ' ¡Carrera perfecta!' : ' Vuelve a intentarlo para subir al podio.');
+    if (!saveOk) {
+      note += ' No se pudo guardar la recompensa: revisa el almacenamiento del navegador.';
+    } else if (coins > 0) {
+      note += ` Has ganado ${coins} monedas.`;
+    }
 
     this.ui.showResults({
       position,
       total: this.karts.length,
       rows,
       note,
+    });
+    this.ui.setProgress(this.progress);
+    this.shop?.setProgress(this.progress);
+    this.shop?.showReward({
+      coins,
+      balance: this.progress.coins,
+      difficulty: this.difficulty.label,
+      won: coins > 0,
     });
     this.ui.updateMinimap(this.track, this.karts, this.playerKart);
   }
@@ -740,9 +1056,12 @@ export class Game {
     this.state = 'menu';
     this.audio.stopEngine();
     this.input.clear();
+    if (this.shop?.isOpen) this.shop.close();
     this.ui.showMenu();
     this.ui.showPause(false);
     this.ui.hideCountdown();
+    this.ui.setProgress(this.progress);
+    this.shop?.setProgress(this.progress);
     this.resetRace();
     this.menuTime = 0;
     this.menuCameraReady = false;
@@ -784,15 +1103,16 @@ export class Game {
     const speedRatio = Math.min(1, Math.abs(kart.speed) / kart.maxSpeed);
 
     const distance = CONFIG.camera.distance + speedRatio * 1.1;
-    const height = CONFIG.camera.height + speedRatio * 0.35;
+    const height = CONFIG.camera.height + speedRatio * 0.35 + (kart.height ?? 0) * 0.7;
     const desiredX = kart.position.x - forwardX * distance;
     const desiredZ = kart.position.z - forwardZ * distance;
     const desiredLookX = kart.position.x + forwardX * CONFIG.camera.lookAhead;
     const desiredLookZ = kart.position.z + forwardZ * CONFIG.camera.lookAhead;
+    const desiredLookY = CONFIG.camera.lookHeight + (kart.height ?? 0) * 0.85;
 
     if (this.snapCamera) {
       this.camPos.set(desiredX, height, desiredZ);
-      this.camLook.set(desiredLookX, CONFIG.camera.lookHeight, desiredLookZ);
+      this.camLook.set(desiredLookX, desiredLookY, desiredLookZ);
       this.snapCamera = false;
     } else {
       const positionFactor = 1 - Math.exp(-dt * 5.6);
@@ -801,7 +1121,7 @@ export class Game {
       this.camPos.y += (height - this.camPos.y) * positionFactor;
       this.camPos.z += (desiredZ - this.camPos.z) * positionFactor;
       this.camLook.x += (desiredLookX - this.camLook.x) * lookFactor;
-      this.camLook.y += (CONFIG.camera.lookHeight - this.camLook.y) * lookFactor;
+      this.camLook.y += (desiredLookY - this.camLook.y) * lookFactor;
       this.camLook.z += (desiredLookZ - this.camLook.z) * lookFactor;
     }
 
@@ -837,7 +1157,9 @@ export class Game {
     switch (this.state) {
       case 'menu':
         this.updateMenuCamera(dt);
-        if (this.preview) {
+        if (this.shop?.isOpen) {
+          this.shop.update(dt);
+        } else if (this.preview) {
           this.preview.update(dt);
           this.preview.render();
         }
@@ -875,6 +1197,7 @@ export class Game {
     this.input.dispose();
     this.audio.dispose();
     if (this.preview) this.preview.dispose();
+    if (this.shop) this.shop.dispose();
 
     if (this.itemSystem) this.itemSystem.dispose();
     for (const kart of this.karts) {

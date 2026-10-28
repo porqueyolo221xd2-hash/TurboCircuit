@@ -25,8 +25,9 @@ export function computeAIControls(kart, track, context = {}) {
   const mistakeChance = clamp(profile.mistakeChance * (tuning?.mistakeChance ?? 1), 0, 1);
   const mistakeAmplitude = 0.32 * (tuning?.mistakeAmplitude ?? 1);
   const lookAheadBias = profile.lookAheadBias + (tuning?.lookAheadBias ?? 0);
-  const cornerSpeed = profile.cornerSpeed * (tuning?.cornerSpeed ?? 1);
-  const cornerCaution = profile.cornerCaution * (tuning?.cornerCaution ?? 1);
+  const cornerGrip = clamp(tuning?.cornerGrip ?? 0.8, 0.2, 1.02);
+  const brakeMargin = Math.max(0.8, tuning?.brakeMargin ?? 1.3);
+  const cornerFloor = clamp(tuning?.cornerFloor ?? 0.24, 0.1, 0.5);
   const anticipation = clamp(tuning?.anticipation ?? 1, 0.75, 1.4);
   const apexLine = clamp(tuning?.apexLine ?? 0, 0, 1);
   const driftChance = clamp(tuning?.driftChance ?? 0, 0, 1);
@@ -206,7 +207,53 @@ export function computeAIControls(kart, track, context = {}) {
     targetLane = clamp(targetLane + line, -laneLimit, laneLimit);
   }
 
-  kart.aiLaneCurrent = damp(kart.aiLaneCurrent, targetLane, 2.8, dt);
+  // -------------------------------------------------------------------------
+  // Obstáculos móviles: se predice dónde estarán al llegar y se abre hueco.
+  // Sin hueco disponible, se levanta el pie para que el obstáculo se mueva.
+  // -------------------------------------------------------------------------
+  const obstacles = track.features?.obstacles ?? [];
+  let dodging = false;
+  let obstacleBrake = 1;
+  if (obstacles.length > 0) {
+    const speedNow = Math.abs(kart.speed);
+    let blocked = null;
+    let blockedGap = Infinity;
+    for (const obstacle of obstacles) {
+      const gapAhead = track.wrapDelta(obstacle.s - s);
+      if (gapAhead < 2 || gapAhead > 34) continue;
+      const reach = gapAhead / Math.max(9, speedNow);
+      const predicted =
+        obstacle.baseLateral +
+        Math.sin((raceTime + reach) * obstacle.speed + obstacle.phase) * obstacle.amplitude;
+      const clearance = obstacle.width / 2 + 1.75;
+      if (Math.abs(predicted - kart.aiLaneCurrent) > clearance) continue;
+      if (gapAhead < blockedGap) {
+        blocked = { width: obstacle.width, predicted, gapAhead, clearance };
+        blockedGap = gapAhead;
+      }
+    }
+
+    if (blocked) {
+      const halfClear = blocked.width / 2 + 2.35;
+      const options = [blocked.predicted - halfClear, blocked.predicted + halfClear]
+        .filter((lane) => Math.abs(lane) <= laneLimit)
+        .sort(
+          (a, b) =>
+            Math.abs(a - kart.aiLaneCurrent) - Math.abs(b - kart.aiLaneCurrent),
+        );
+      const lane = options.find(
+        (candidate) => Math.abs(candidate - blocked.predicted) >= blocked.clearance,
+      );
+      if (lane !== undefined) {
+        targetLane = lane;
+        dodging = true;
+      } else {
+        obstacleBrake = blocked.gapAhead < 14 ? 0.6 : 0.82;
+      }
+    }
+  }
+
+  kart.aiLaneCurrent = damp(kart.aiLaneCurrent, targetLane, dodging ? 5.4 : 2.8, dt);
 
   // -------------------------------------------------------------------------
   // Velocidad objetivo. Se tiene en cuenta el turbo y el IMPULSO activos para
@@ -220,11 +267,35 @@ export function computeAIControls(kart, track, context = {}) {
   const pace = kart.speedBias * kart.paceFactor;
   const maxSpeed = kart.maxSpeed * pace * (1 + boost) * slow;
 
-  let targetSpeed = maxSpeed * clamp(1 - cornerSpeed * severity * cornerCaution, 0.24, 1);
-  targetSpeed = Math.max(maxSpeed * (tuning?.minCornerFactor ?? 0.34), targetSpeed);
+  // Velocidad máxima real de paso por curva. El kart gira a
+  // ω = turnRate · (1 − 0,32·v/vmax), y para seguir un arco de curvatura κ
+  // necesita ω = v·κ. Despejando: v = turnRate / (κ + 0,32·turnRate/vmax).
+  // No es una regla inventada: sale de la física que aplica Kart.step().
+  const geometrySpeed = (kappa) => {
+    if (kappa < 1e-4) return Infinity;
+    return kart.turnRate / (kappa + (kart.turnRate * 0.32) / Math.max(1, kart.maxSpeed));
+  };
+
+  // Perfil de frenada: se mira la curvatura por delante y se calcula a qué
+  // velocidad habría que ir AHORA para llegar a cada punto a la velocidad de
+  // paso. Así se frena tarde pero a tiempo, en vez de arrastrarse toda la curva.
+  const brakeAccel = Math.max(8, (kart.brakePower ?? 38) * 0.88) / brakeMargin;
+  const probeDistances = [2, 8, 15, 24, 36, 52, 72];
+  let targetSpeed = maxSpeed;
+  for (const distance of probeDistances) {
+    const kappa = track.curvatureAt(s + distance * anticipation);
+    if (!Number.isFinite(kappa) || kappa < 1e-4) continue;
+    const cornerSpeed = geometrySpeed(kappa) * cornerGrip;
+    const allowed = Math.sqrt(
+      cornerSpeed * cornerSpeed + 2 * brakeAccel * Math.max(0, distance - 3),
+    );
+    if (allowed < targetSpeed) targetSpeed = allowed;
+  }
+  targetSpeed = Math.max(targetSpeed, maxSpeed * cornerFloor);
 
   if (kart.onGrass) targetSpeed *= 0.72;
   if (kart.finished) targetSpeed *= 0.6;
+  targetSpeed *= obstacleBrake;
 
   // No empotrarse contra el kart que va justo delante si aún no hay hueco.
   if (nearestAhead && nearestGap < 7) {

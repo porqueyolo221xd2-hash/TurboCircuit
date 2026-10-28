@@ -1,5 +1,6 @@
 // Kart original construido con geometrías simples y física arcade.
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CONFIG } from './config.js';
 import { clamp, damp, lerpAngle } from './utils.js';
 
@@ -9,63 +10,164 @@ const DRIFT = CONFIG.drift;
 // Proporciones de carrocería por estilo. Comparten materiales, ruedas y pilotos,
 // pero cambian silueta, anchura y distancia entre ejes.
 const STYLE_SHAPES = {
+  // Cada estilo define una silueta propia: proporciones, morro, pontones,
+  // alerón y ruedas. La física no depende de estos valores.
   standard: {
-    chassisW: 1.7,
-    chassisH: 0.42,
-    chassisL: 2.45,
-    chassisY: 0.66,
-    noseW: 1.25,
-    podW: 0.34,
-    podX: 0.76,
+    bodyW: 1.15,
+    bodyL: 2.25,
+    bodyY: 0.66,
+    noseW: 0.44,
+    noseLen: 1.05,
+    noseBaseZ: 0.68,
+    podW: 0.4,
+    podH: 0.36,
+    podL: 1.25,
+    podY: 0.5,
+    podZ: -0.18,
+    frontWingW: 1.8,
+    engineW: 0.6,
+    exhaustX: 0.26,
+    exhaustY: 0.56,
+    exhaustZ: -1.42,
     wingW: 1.85,
-    wingHeight: 0.5,
-    wingX: 0.55,
+    wingY: 1.24,
     wheelTrack: 0.9,
-    wheelBase: 0.98,
+    wheelBase: 1,
+    wheelRadius: 0.36,
   },
   speedster: {
-    chassisW: 1.56,
-    chassisH: 0.36,
-    chassisL: 2.75,
-    chassisY: 0.6,
-    noseW: 1.02,
-    podW: 0.28,
-    podX: 0.72,
-    wingW: 2,
-    wingHeight: 0.38,
-    wingX: 0.62,
+    bodyW: 1.05,
+    bodyL: 2.45,
+    bodyY: 0.64,
+    noseW: 0.36,
+    noseLen: 1.32,
+    noseBaseZ: 0.75,
+    podW: 0.33,
+    podH: 0.3,
+    podL: 1.15,
+    podY: 0.48,
+    podZ: -0.2,
+    frontWingW: 1.65,
+    engineW: 0.5,
+    exhaustX: 0.22,
+    exhaustY: 0.54,
+    exhaustZ: -1.52,
+    wingW: 1.55,
+    wingY: 1.04,
     wheelTrack: 0.88,
     wheelBase: 1.08,
+    wheelRadius: 0.355,
   },
   agile: {
-    chassisW: 1.62,
-    chassisH: 0.44,
-    chassisL: 2.22,
-    chassisY: 0.64,
-    noseW: 1.12,
-    podW: 0.3,
-    podX: 0.74,
+    bodyW: 1.08,
+    bodyL: 2.1,
+    bodyY: 0.66,
+    noseW: 0.46,
+    noseLen: 0.88,
+    noseBaseZ: 0.62,
+    podW: 0.34,
+    podH: 0.32,
+    podL: 1,
+    podY: 0.5,
+    podZ: -0.12,
+    frontWingW: 1.7,
+    engineW: 0.56,
+    exhaustX: 0.25,
+    exhaustY: 0.55,
+    exhaustZ: -1.3,
     wingW: 1.7,
-    wingHeight: 0.46,
-    wingX: 0.5,
+    wingY: 1.36,
     wheelTrack: 0.86,
-    wheelBase: 0.9,
+    wheelBase: 0.92,
+    wheelRadius: 0.355,
   },
   heavy: {
-    chassisW: 1.98,
-    chassisH: 0.5,
-    chassisL: 2.5,
-    chassisY: 0.7,
-    noseW: 1.42,
-    podW: 0.42,
-    podX: 0.86,
-    wingW: 2.08,
-    wingHeight: 0.62,
-    wingX: 0.62,
-    wheelTrack: 0.98,
-    wheelBase: 0.96,
+    bodyW: 1.34,
+    bodyL: 2.35,
+    bodyY: 0.7,
+    noseW: 0.58,
+    noseLen: 0.9,
+    noseBaseZ: 0.72,
+    podW: 0.48,
+    podH: 0.42,
+    podL: 1.3,
+    podY: 0.54,
+    podZ: -0.2,
+    frontWingW: 2.05,
+    engineW: 0.7,
+    exhaustX: 0.3,
+    exhaustY: 0.6,
+    exhaustZ: -1.5,
+    wingW: 2.1,
+    wingY: 1.34,
+    wheelTrack: 1,
+    wheelBase: 0.98,
+    wheelRadius: 0.385,
   },
 };
+
+/**
+ * Acumulador de piezas: agrupa geometrías por material y las fusiona en una
+ * sola malla. Permite modelar con mucho detalle sin disparar los draw calls.
+ */
+class PartBuilder {
+  constructor() {
+    this.groups = new Map();
+  }
+
+  add(material, geometry) {
+    let list = this.groups.get(material);
+    if (!list) {
+      list = [];
+      this.groups.set(material, list);
+    }
+    list.push(geometry);
+  }
+
+  commit(target) {
+    for (const [material, geometries] of this.groups) {
+      const merged = mergeGeometries(geometries, false);
+      for (const geometry of geometries) geometry.dispose();
+      if (!merged) continue;
+      merged.computeBoundingSphere();
+      const mesh = new THREE.Mesh(merged, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      target.add(mesh);
+    }
+    this.groups.clear();
+  }
+}
+
+/** Caja con tapa superior e inferior de distinto tamaño (volumen troncocónico). */
+function taperedBoxY(wBottom, dBottom, wTop, dTop, height) {
+  const geometry = new THREE.BoxGeometry(wBottom, height, dBottom);
+  const position = geometry.attributes.position;
+  const ratioW = wTop / wBottom;
+  const ratioD = dTop / dBottom;
+  for (let i = 0; i < position.count; i += 1) {
+    const t = (position.getY(i) + height / 2) / height;
+    position.setX(i, position.getX(i) * (1 + (ratioW - 1) * t));
+    position.setZ(i, position.getZ(i) * (1 + (ratioD - 1) * t));
+  }
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+/** Caja que se estrecha hacia el morro (+Z). */
+function taperedBoxZ(wBack, hBack, wFront, hFront, length) {
+  const geometry = new THREE.BoxGeometry(wBack, hBack, length);
+  const position = geometry.attributes.position;
+  const ratioW = wFront / wBack;
+  const ratioH = hFront / hBack;
+  for (let i = 0; i < position.count; i += 1) {
+    const t = position.getZ(i) / length + 0.5;
+    position.setX(i, position.getX(i) * (1 + (ratioW - 1) * t));
+    position.setY(i, position.getY(i) * (1 + (ratioH - 1) * t));
+  }
+  geometry.computeVertexNormals();
+  return geometry;
+}
 
 export class Kart {
   constructor({
@@ -114,6 +216,16 @@ export class Kart {
     this.pitch = 0;
     this.onGrass = false;
     this.wallContact = false;
+
+    // Salto: altura sobre el suelo, velocidad vertical y estado aéreo.
+    this.height = 0;
+    this.verticalVelocity = 0;
+    this.airborne = false;
+    this.airTime = 0;
+    this.rampHeight = 0;
+    this.landingTime = 0;
+    this.justLanded = false;
+    this.featureCooldowns = new Map();
 
     this.trackS = 0;
     this.lateral = 0;
@@ -171,6 +283,11 @@ export class Kart {
     this.impactTime = 0;
     this.impactDuration = 0;
     this.impactSteer = 0;
+    this.stunTime = 0;
+    this.stunDuration = 0;
+    this.stunImmunity = 0;
+    this.stunPhase = 0;
+    this.projectileGrace = 0;
 
     this.group = new THREE.Group();
     this.group.name = `kart-${name}`;
@@ -187,70 +304,449 @@ export class Kart {
   // Modelo visual
   // ---------------------------------------------------------------------------
 
+  /**
+   * Acumulador de piezas: agrupa geometrías por material y las fusiona en una
+   * sola malla. Permite modelar con detalle (morro, pontones, alerón, escapes)
+   * sin disparar el número de draw calls.
+   */
   buildModel() {
-    const bodyMaterial = this.makeMaterial(this.color, 0.45, 0.1);
-    const accentMaterial = this.makeMaterial(this.accent, 0.4, 0.05);
-    const darkMaterial = this.makeMaterial(0x23262f, 0.7, 0.1);
-    const tireMaterial = this.makeMaterial(0x15171c, 0.95, 0);
-    const rimMaterial = this.makeMaterial(0xd9dee8, 0.35, 0.5);
-    const visorMaterial = this.makeMaterial(0x111a2b, 0.2, 0.6);
-    const whiteMaterial = this.makeMaterial(0xf5f3e9, 0.6, 0);
     const shape = STYLE_SHAPES[this.bodyStyle] ?? STYLE_SHAPES.standard;
 
-    // Chasis y carrocería.
-    this.addBox(shape.chassisW + 0.2, 0.2, shape.chassisL + 0.45, 0, 0.38, 0, darkMaterial);
-    this.addBox(shape.chassisW, shape.chassisH, shape.chassisL, 0, shape.chassisY, -0.05, bodyMaterial);
-    this.addBox(shape.noseW, 0.22, 0.95, 0, shape.chassisY + 0.12, 1.02, accentMaterial);
-    this.addBox(shape.noseW * 0.76, 0.2, 0.55, 0, shape.chassisY - 0.04, 1.5, bodyMaterial);
-    this.addBox(shape.chassisW + 0.12, 0.16, 0.38, 0, 0.42, 1.48, darkMaterial);
+    const paint = this.makeMaterial(this.color, 0.38, 0.18);
+    const paintDark = this.makeMaterial(
+      new THREE.Color(this.color).multiplyScalar(0.48),
+      0.46,
+      0.12,
+    );
+    const accent = this.makeMaterial(this.accent, 0.38, 0.14);
+    const carbon = this.makeMaterial(0x14171d, 0.68, 0.1);
+    const rubber = this.makeMaterial(0x0b0d11, 0.96, 0.02);
+    const rim = this.makeMaterial(0xe2e9f3, 0.3, 0.38);
+    const chrome = this.makeMaterial(0xb9c4d6, 0.26, 0.42);
+    const glass = this.makeMaterial(0x0a1524, 0.16, 0.18);
+    const suit = this.makeMaterial(0xf5f7fb, 0.62, 0.04);
+    const headlight = new THREE.MeshStandardMaterial({
+      color: 0xfff7dc,
+      emissive: 0xffe49c,
+      emissiveIntensity: 2.8,
+      roughness: 0.2,
+    });
+    const taillight = new THREE.MeshStandardMaterial({
+      color: 0xff3346,
+      emissive: 0xff1b30,
+      emissiveIntensity: 2.4,
+      roughness: 0.3,
+    });
+    this.materials.push(headlight, taillight);
+    this.paintMaterial = paint;
+    this.accentMaterial = accent;
 
-    // Pods laterales y asiento.
+    const b = new PartBuilder();
+    const put = (mat, geo, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => {
+      if (rx) geo.rotateX(rx);
+      if (ry) geo.rotateY(ry);
+      if (rz) geo.rotateZ(rz);
+      geo.translate(x, y, z);
+      b.add(mat, geo);
+    };
+
+    const wheelR = shape.wheelRadius;
+    const bodyW = shape.bodyW;
+    const bodyY = shape.bodyY;
+    const noseBaseZ = shape.noseBaseZ;
+    const noseLen = shape.noseLen;
+    const noseTipZ = noseBaseZ + noseLen;
+    const rearZ = -shape.bodyL * 0.5;
+    const wingY = shape.wingY;
+    const wingZ = rearZ - 0.16;
+
+    // --- Plataforma, fondo y cuerpo central --------------------------------
+    put(carbon, taperedBoxY(bodyW * 0.84, shape.bodyL * 0.92, bodyW * 0.9, shape.bodyL * 0.78, 0.08), 0, 0.3, -0.04);
+    put(paintDark, taperedBoxY(bodyW * 0.98, shape.bodyL * 0.78, bodyW * 0.84, shape.bodyL * 0.62, 0.24), 0, 0.44, -0.1);
+    put(paint, taperedBoxY(bodyW * 0.9, shape.bodyL * 0.6, bodyW * 0.66, shape.bodyL * 0.52, 0.3), 0, 0.63, -0.2);
+
+    // Morro: cuna baja y afilada que termina en punta.
+    put(
+      paint,
+      taperedBoxZ(bodyW * 0.7, 0.34, shape.noseW, 0.14, noseLen),
+      0,
+      0.55,
+      noseBaseZ + noseLen * 0.5,
+    );
+    put(
+      paintDark,
+      taperedBoxZ(bodyW * 0.72, 0.07, shape.noseW * 1.02, 0.05, noseLen * 0.96),
+      0,
+      0.39,
+      noseBaseZ + noseLen * 0.48,
+    );
+    // Puntera y faros integrados.
+    put(accent, new THREE.BoxGeometry(shape.noseW * 0.9, 0.07, 0.12), 0, 0.57, noseTipZ - 0.04);
+    put(accent, new THREE.BoxGeometry(0.14, 0.022, noseLen * 0.8), 0, 0.69, noseBaseZ + noseLen * 0.5, 0.095);
+    put(carbon, new THREE.BoxGeometry(shape.noseW * 0.55, 0.12, 0.08), 0, 0.5, noseTipZ - 0.02);
     for (const sign of [-1, 1]) {
-      this.addBox(shape.podW, 0.3, 1.35, sign * shape.podX, shape.chassisY - 0.04, -0.15, accentMaterial);
+      put(
+        headlight,
+        new THREE.BoxGeometry(0.14, 0.06, 0.04),
+        sign * shape.noseW * 0.32,
+        0.54,
+        noseTipZ - 0.3,
+      );
     }
-    this.addBox(0.92, 0.6, 0.64, 0, 0.92, -0.72, darkMaterial);
-    this.addBox(0.96, 0.12, 0.7, 0, 1.2, -0.76, accentMaterial);
 
-    // Alerón trasero.
-    this.addBox(0.1, shape.wingHeight, 0.1, -shape.wingX, 1.11, -1.34, darkMaterial);
-    this.addBox(0.1, shape.wingHeight, 0.1, shape.wingX, 1.11, -1.34, darkMaterial);
-    this.addBox(shape.wingW, 0.09, 0.42, 0, 1.38, -1.38, accentMaterial);
-    this.addBox(0.5, 0.22, 0.1, -shape.wingX - 0.17, 1.26, -1.38, bodyMaterial);
-    this.addBox(0.5, 0.22, 0.1, shape.wingX + 0.17, 1.26, -1.38, bodyMaterial);
-
-    // Parachoques y escapes.
-    this.addBox(shape.chassisW, 0.18, 0.3, 0, 0.44, -1.5, darkMaterial);
+    // Alerón delantero bajo, con endplates, flap y soportes al morro.
+    const fwZ = noseTipZ + 0.06;
+    put(carbon, new THREE.BoxGeometry(shape.frontWingW * 0.92, 0.05, 0.34), 0, 0.22, fwZ);
+    put(paint, new THREE.BoxGeometry(shape.frontWingW * 0.7, 0.035, 0.18), 0, 0.29, fwZ + 0.08, 0.12);
     for (const sign of [-1, 1]) {
-      this.addCylinder(0.085, 0.085, 0.32, sign * 0.42, 0.55, -1.48, darkMaterial, 'x');
+      put(
+        carbon,
+        new THREE.BoxGeometry(0.05, 0.2, 0.4),
+        sign * shape.frontWingW * 0.46,
+        0.31,
+        fwZ,
+      );
+      put(
+        accent,
+        new THREE.BoxGeometry(0.055, 0.04, 0.4),
+        sign * shape.frontWingW * 0.46,
+        0.42,
+        fwZ,
+      );
+      put(
+        carbon,
+        new THREE.BoxGeometry(0.06, 0.34, 0.09),
+        sign * shape.noseW * 0.38,
+        0.38,
+        fwZ - 0.16,
+      );
     }
 
-    // Rasgos de silueta propios de cada estilo.
+    // Suspensión vista: brazos que unen el chasis con cada rueda.
+    for (const sign of [-1, 1]) {
+      for (const z of [shape.wheelBase, -shape.wheelBase]) {
+        put(
+          carbon,
+          new THREE.CylinderGeometry(0.03, 0.03, 0.42, 8),
+          sign * 0.68,
+          shape.wheelRadius + 0.07,
+          z,
+          0,
+          0,
+          Math.PI / 2,
+        );
+        put(
+          chrome,
+          new THREE.CylinderGeometry(0.026, 0.026, 0.4, 8),
+          sign * 0.66,
+          shape.wheelRadius - 0.06,
+          z + 0.1,
+          0,
+          0,
+          Math.PI / 2,
+        );
+      }
+    }
+
+    // Pontones laterales con entrada de aire frontal.
+    for (const sign of [-1, 1]) {
+      put(
+        paint,
+        taperedBoxZ(shape.podW, shape.podH, shape.podW * 0.78, shape.podH * 0.72, shape.podL),
+        sign * (bodyW * 0.5 + shape.podW * 0.36),
+        shape.podY,
+        shape.podZ,
+      );
+      put(
+        carbon,
+        new THREE.BoxGeometry(shape.podW * 0.58, shape.podH * 0.42, 0.1),
+        sign * (bodyW * 0.5 + shape.podW * 0.36),
+        shape.podY - 0.02,
+        shape.podZ + shape.podL * 0.47,
+      );
+      put(
+        accent,
+        new THREE.BoxGeometry(0.05, 0.05, shape.podL * 0.8),
+        sign * (bodyW * 0.5 + shape.podW * 0.72),
+        shape.podY + shape.podH * 0.36,
+        shape.podZ,
+      );
+      // Roundel lateral: aro de color y disco claro.
+      put(
+        accent,
+        new THREE.CylinderGeometry(0.15, 0.15, 0.02, 18),
+        sign * (bodyW * 0.5 + shape.podW * 0.5 + 0.015),
+        shape.podY + 0.02,
+        shape.podZ - 0.03,
+        0,
+        0,
+        Math.PI / 2,
+      );
+      put(
+        rim,
+        new THREE.CylinderGeometry(0.115, 0.115, 0.024, 18),
+        sign * (bodyW * 0.5 + shape.podW * 0.5 + 0.02),
+        shape.podY + 0.02,
+        shape.podZ - 0.03,
+        0,
+        0,
+        Math.PI / 2,
+      );
+    }
+
+    // Cockpit abierto, asiento y salpicadero.
+    put(carbon, new THREE.BoxGeometry(bodyW * 0.58, 0.05, 0.82), 0, bodyY + 0.2, -0.05);
+    put(carbon, new THREE.BoxGeometry(bodyW * 0.46, 0.24, 0.3), 0, bodyY + 0.32, -0.33);
+    put(paintDark, new THREE.BoxGeometry(bodyW * 0.56, 0.16, 0.12), 0, bodyY + 0.28, 0.3);
+    for (const sign of [-1, 1]) {
+      put(
+        paintDark,
+        new THREE.BoxGeometry(0.09, 0.3, 0.78),
+        sign * bodyW * 0.31,
+        bodyY + 0.13,
+        -0.05,
+      );
+    }
+    put(carbon, new THREE.BoxGeometry(0.36, 0.22, 0.12), 0, bodyY + 0.55, -0.34);
+
+    // Cubierta del motor: baja hacia la zaga.
+    put(
+      paint,
+      taperedBoxZ(shape.engineW, 0.2, shape.engineW * 0.72, 0.34, 0.95),
+      0,
+      0.7,
+      -0.86,
+    );
+    put(accent, new THREE.BoxGeometry(0.12, 0.03, 0.8), 0, 0.83, -0.82);
+    put(carbon, new THREE.BoxGeometry(shape.engineW * 0.8, 0.06, 0.5), 0, 0.79, -0.6);
+
+    // Escapes gemelos.
+    for (const sign of [-1, 1]) {
+      put(
+        chrome,
+        new THREE.CylinderGeometry(0.062, 0.075, 0.26, 10),
+        sign * shape.exhaustX,
+        shape.exhaustY,
+        shape.exhaustZ,
+        Math.PI / 2,
+      );
+      put(
+        carbon,
+        new THREE.CylinderGeometry(0.078, 0.078, 0.07, 10),
+        sign * shape.exhaustX,
+        shape.exhaustY,
+        shape.exhaustZ - 0.15,
+        Math.PI / 2,
+      );
+    }
+
+    // Piloto: torso, casco con visera, brazos y volante.
+    put(carbon, new THREE.BoxGeometry(0.54, 0.1, 0.34), 0, bodyY + 0.19, -0.28);
+    put(
+      suit,
+      new THREE.CapsuleGeometry(0.17, 0.24, 4, 12),
+      0,
+      bodyY + 0.3,
+      -0.22,
+      -0.12,
+    );
+    put(accent, new THREE.BoxGeometry(0.26, 0.09, 0.2), 0, bodyY + 0.32, -0.05);
+    put(
+      paint,
+      new THREE.SphereGeometry(0.21, 18, 14),
+      0,
+      bodyY + 0.61,
+      -0.16,
+    );
+    put(accent, new THREE.BoxGeometry(0.08, 0.1, 0.42), 0, bodyY + 0.75, -0.16);
+    put(
+      glass,
+      new THREE.CylinderGeometry(0.214, 0.214, 0.13, 18, 1, true, -0.95, 1.9),
+      0,
+      bodyY + 0.63,
+      -0.16,
+    );
+    put(suit, new THREE.BoxGeometry(0.18, 0.07, 0.06), 0, bodyY + 0.53, 0.015);
+    for (const sign of [-1, 1]) {
+      put(
+        suit,
+        new THREE.CapsuleGeometry(0.06, 0.24, 3, 8),
+        sign * 0.18,
+        bodyY + 0.28,
+        0.02,
+        1.15,
+        0,
+        sign * 0.22,
+      );
+      put(carbon, new THREE.SphereGeometry(0.065, 8, 6), sign * 0.16, bodyY + 0.19, 0.25);
+    }
+    put(carbon, new THREE.TorusGeometry(0.145, 0.026, 6, 16), 0, bodyY + 0.25, 0.33, -1.15);
+    put(chrome, new THREE.CylinderGeometry(0.026, 0.026, 0.28, 8), 0, bodyY + 0.19, 0.42, 1.2);
+
+    // Alerón trasero: dos planos, soportes y endplates.
+    const wingW = shape.wingW;
+    for (const sign of [-1, 1]) {
+      put(
+        carbon,
+        new THREE.BoxGeometry(0.06, wingY - 0.68, 0.1),
+        sign * (wingW * 0.22),
+        0.68 + (wingY - 0.68) * 0.5,
+        wingZ + 0.1,
+      );
+      put(
+        carbon,
+        new THREE.BoxGeometry(0.05, 0.22, 0.4),
+        sign * wingW * 0.5,
+        wingY + 0.02,
+        wingZ,
+      );
+      put(
+        accent,
+        new THREE.BoxGeometry(0.045, 0.055, 0.42),
+        sign * (wingW * 0.5 - 0.005),
+        wingY + 0.16,
+        wingZ,
+      );
+    }
+    put(accent, new THREE.BoxGeometry(wingW, 0.055, 0.38), 0, wingY, wingZ, 0.08);
+    put(paintDark, new THREE.BoxGeometry(wingW * 0.9, 0.04, 0.24), 0, wingY + 0.13, wingZ - 0.03, 0.16);
+    put(carbon, new THREE.BoxGeometry(0.5, 0.1, 0.2), 0, 0.62, rearZ - 0.06);
+    put(taillight, new THREE.BoxGeometry(0.36, 0.06, 0.05), 0, 0.72, rearZ - 0.1);
+    for (const offset of [-0.26, 0, 0.26]) {
+      put(carbon, new THREE.BoxGeometry(0.035, 0.22, 0.32), offset, 0.3, rearZ - 0.04);
+    }
+
+    // --- Rasgos de silueta por estilo --------------------------------------
     if (this.bodyStyle === 'speedster') {
-      // Morro largo y aletas gemelas: silueta baja y afilada.
-      this.addBox(0.74, 0.1, 0.9, 0, 0.49, 1.92, bodyMaterial);
-      this.addBox(1.5, 0.08, 0.42, 0, 0.36, 1.78, darkMaterial);
+      // Cabina envolvente, aletas traseras gemelas y morro largo.
+      put(
+        glass,
+        new THREE.SphereGeometry(0.34, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+        0,
+        bodyY + 0.2,
+        -0.22,
+      );
       for (const sign of [-1, 1]) {
-        this.addBox(0.07, 0.5, 0.72, sign * 0.66, 1.2, -1.18, accentMaterial);
+        put(
+          accent,
+          taperedBoxY(0.06, 0.55, 0.02, 0.22, 0.85),
+          sign * 0.62,
+          0.98,
+          -1.3,
+        );
+        put(
+          carbon,
+          new THREE.BoxGeometry(0.09, 0.14, 0.6),
+          sign * 0.48,
+          0.36,
+          -1.1,
+        );
+      }
+      // Tomas de aire sobre los pontones.
+      for (const sign of [-1, 1]) {
+        put(
+          carbon,
+          new THREE.BoxGeometry(0.14, 0.06, 0.5),
+          sign * (bodyW * 0.5 + shape.podW * 0.3),
+          shape.podY + shape.podH * 0.5,
+          shape.podZ + 0.2,
+        );
       }
     } else if (this.bodyStyle === 'agile') {
-      // Pods redondeados y aleta central: aspecto ligero y corto.
+      // Aleta central, pontones redondeados y suspensión a la vista.
+      put(
+        paint,
+        taperedBoxY(0.07, 0.96, 0.025, 0.42, 0.9),
+        0,
+        1.02,
+        -0.95,
+      );
+      put(accent, new THREE.BoxGeometry(0.09, 0.07, 0.78), 0, 1.47, -0.95);
       for (const sign of [-1, 1]) {
-        this.addCylinder(0.2, 0.2, 1.2, sign * 0.8, 0.64, -0.12, accentMaterial, 'z');
+        put(
+          paint,
+          new THREE.CylinderGeometry(0.17, 0.19, shape.podL, 12),
+          sign * (bodyW * 0.5 + shape.podW * 0.42),
+          shape.podY,
+          shape.podZ,
+          Math.PI / 2,
+        );
+        put(
+          accent,
+          new THREE.TorusGeometry(0.19, 0.02, 6, 16),
+          sign * (bodyW * 0.5 + shape.podW * 0.42),
+          shape.podY,
+          shape.podZ + shape.podL * 0.5,
+        );
+        put(
+          chrome,
+          new THREE.CylinderGeometry(0.028, 0.028, 0.68, 8),
+          sign * (bodyW * 0.5 + 0.26),
+          0.3,
+          shape.wheelBase,
+          Math.PI / 2,
+          0.14,
+        );
+        put(
+          chrome,
+          new THREE.CylinderGeometry(0.026, 0.026, 0.64, 8),
+          sign * (bodyW * 0.5 + 0.26),
+          0.3,
+          -shape.wheelBase,
+          Math.PI / 2,
+          -0.14,
+        );
       }
-      this.addBox(0.08, 0.38, 0.62, 0, 1.5, -0.92, accentMaterial);
-      this.addBox(0.92, 0.08, 0.5, 0, 0.52, 1.72, darkMaterial);
+      put(rim, new THREE.BoxGeometry(bodyW * 0.5, 0.05, 0.28), 0, 0.33, noseTipZ - 0.06);
     } else if (this.bodyStyle === 'heavy') {
-      // Parachoques reforzado, faldones y arco de protección.
-      this.addBox(shape.chassisW + 0.34, 0.15, 0.18, 0, 0.52, 1.84, darkMaterial);
+      // Paragolpes macizos, jaula antivuelco y escapes verticales.
+      put(carbon, new THREE.BoxGeometry(bodyW * 1.02, 0.18, 0.28), 0, 0.43, noseTipZ - 0.12);
+      put(carbon, new THREE.BoxGeometry(bodyW * 0.96, 0.2, 0.3), 0, 0.5, rearZ - 0.02);
       for (const sign of [-1, 1]) {
-        this.addBox(0.14, 0.34, 0.18, sign * 0.66, 0.68, 1.84, darkMaterial);
-        this.addBox(0.12, 0.26, 1.3, sign * 0.92, 0.4, -0.1, darkMaterial);
-        this.addBox(0.1, 0.9, 0.1, sign * 0.58, 1.5, -0.68, darkMaterial);
+        put(
+          rim,
+          new THREE.CylinderGeometry(0.055, 0.055, 1.02, 8),
+          sign * 0.55,
+          1.08,
+          -0.3,
+        );
+        put(
+          rim,
+          new THREE.CylinderGeometry(0.055, 0.055, 0.82, 8),
+          sign * 0.55,
+          1.58,
+          -0.08,
+          Math.PI / 2,
+        );
+        put(
+          rim,
+          new THREE.CylinderGeometry(0.055, 0.055, 1.12, 8),
+          0,
+          1.58,
+          -0.08,
+          0,
+          0,
+          Math.PI / 2,
+        );
+        put(
+          chrome,
+          new THREE.CylinderGeometry(0.07, 0.08, 0.5, 10),
+          sign * (shape.exhaustX + 0.16),
+          0.86,
+          rearZ + 0.16,
+        );
       }
-      this.addBox(1.26, 0.1, 0.1, 0, 1.95, -0.68, darkMaterial);
+      put(carbon, new THREE.BoxGeometry(bodyW * 1.06, 0.2, 0.26), 0, 0.56, noseTipZ + 0.04);
     }
 
-    // Llamas del turbo: geometría barata que solo se ve durante la aceleración.
+    b.commit(this.model);
+    for (const child of this.model.children) {
+      if (child.isMesh && child.geometry) this.geometries.push(child.geometry);
+    }
+
+    this.buildWheels(shape, rubber, carbon, rim, accent, chrome);
+
+    // Llamas del turbo: se encienden solo al acelerar.
     this.turboMaterial = new THREE.MeshBasicMaterial({
       color: 0x5fe6ff,
       transparent: true,
@@ -260,19 +756,18 @@ export class Kart {
     });
     this.materials.push(this.turboMaterial);
     this.turboFlames = [];
+    const flameGeometry = new THREE.ConeGeometry(0.1, 0.9, 8);
     for (const sign of [-1, 1]) {
-      const flame = new THREE.Mesh(
-        this.trackGeometry(new THREE.ConeGeometry(0.13, 0.8, 8)),
-        this.turboMaterial,
-      );
-      flame.position.set(sign * 0.42, 0.55, -1.72);
+      const flame = new THREE.Mesh(flameGeometry, this.turboMaterial);
+      flame.position.set(sign * shape.exhaustX, shape.exhaustY, shape.exhaustZ - 0.6);
       flame.rotation.x = -Math.PI / 2;
       flame.visible = false;
       this.model.add(flame);
       this.turboFlames.push(flame);
     }
+    this.geometries.push(flameGeometry);
 
-    // Barrera: burbuja de alambre muy barata que solo se ve mientras protege.
+    // Barrera: burbuja de alambre que solo se ve mientras protege.
     this.barrierMaterial = new THREE.MeshBasicMaterial({
       color: 0x77f06b,
       transparent: true,
@@ -285,67 +780,96 @@ export class Kart {
       this.trackGeometry(new THREE.IcosahedronGeometry(1.95, 1)),
       this.barrierMaterial,
     );
-    this.barrierMesh.position.y = 0.95;
+    this.barrierMesh.position.y = 0.85;
     this.barrierMesh.visible = false;
     this.model.add(this.barrierMesh);
 
-    // Piloto.
-    this.addBox(0.55, 0.48, 0.34, 0, 1.03, -0.62, whiteMaterial);
-    const torso = new THREE.Mesh(
-      this.trackGeometry(new THREE.CapsuleGeometry(0.26, 0.34, 4, 10)),
-      accentMaterial,
-    );
-    torso.position.set(0, 1.22, -0.52);
-    torso.castShadow = true;
-    this.model.add(torso);
-
-    for (const sign of [-1, 1]) {
-      const arm = new THREE.Mesh(
-        this.trackGeometry(new THREE.CapsuleGeometry(0.075, 0.38, 3, 8)),
-        whiteMaterial,
+    // Estrellas de aturdimiento: tres rombos que orbitan sobre el casco.
+    this.stunMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffd23f,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.materials.push(this.stunMaterial);
+    this.stunStars = new THREE.Group();
+    this.stunStars.position.y = CONFIG.stun.starHeight * 0.86;
+    this.stunStars.visible = false;
+    const starGeometry = this.trackGeometry(new THREE.OctahedronGeometry(0.095, 0));
+    for (let i = 0; i < 3; i += 1) {
+      const star = new THREE.Mesh(starGeometry, this.stunMaterial);
+      const angle = (i / 3) * Math.PI * 2;
+      star.position.set(
+        Math.cos(angle) * 0.36,
+        Math.sin(angle * 3) * 0.045,
+        Math.sin(angle) * 0.36,
       );
-      arm.position.set(sign * 0.3, 1.14, -0.2);
-      arm.rotation.x = 1.05;
-      arm.rotation.z = sign * 0.25;
-      arm.castShadow = true;
-      this.model.add(arm);
+      this.stunStars.add(star);
     }
+    this.model.add(this.stunStars);
 
-    const wheel = new THREE.Mesh(
-      this.trackGeometry(new THREE.TorusGeometry(0.18, 0.035, 6, 16)),
-      darkMaterial,
+    // Sombra de contacto (barata y siempre bajo el kart).
+    const shadow = new THREE.Mesh(
+      this.trackGeometry(new THREE.CircleGeometry(1.05, 20)),
+      new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0.2,
+        depthWrite: false,
+      }),
     );
-    wheel.position.set(0, 1.08, -0.08);
-    wheel.rotation.x = -1.1;
-    this.model.add(wheel);
+    shadow.rotation.x = -Math.PI / 2;
+    shadow.position.y = -0.008;
+    shadow.scale.set(shape.bodyW / 1.7, (shape.bodyL / 2.45) * 1.55, 1);
+    this.group.add(shadow);
+    this.shadow = shadow;
+    this.shadowMaterial = shadow.material;
+    this.shadowBaseScale = shadow.scale.clone();
+  }
 
-    const head = new THREE.Mesh(
-      this.trackGeometry(new THREE.SphereGeometry(0.31, 16, 12)),
-      bodyMaterial,
-    );
-    head.position.set(0, 1.7, -0.5);
-    head.scale.set(1, 0.95, 1.02);
-    head.castShadow = true;
-    this.model.add(head);
+  /** Ruedas con neumático toroidal, llanta, radios y buje (3 mallas por rueda). */
+  buildWheels(shape, rubber, carbon, rim, accent, chrome) {
+    const tireParts = [];
+    const tire = new THREE.TorusGeometry(0.277, 0.083, 10, 22);
+    tire.rotateY(Math.PI / 2);
+    tireParts.push(tire);
+    const tireInner = new THREE.CylinderGeometry(0.17, 0.17, 0.16, 18);
+    tireInner.rotateZ(Math.PI / 2);
+    tireParts.push(tireInner);
+    const tireGeometry = mergeGeometries(tireParts, false);
+    for (const part of tireParts) part.dispose();
+    tireGeometry.computeBoundingSphere();
+    this.geometries.push(tireGeometry);
 
-    const visor = new THREE.Mesh(
-      this.trackGeometry(new THREE.BoxGeometry(0.4, 0.16, 0.22)),
-      visorMaterial,
-    );
-    visor.position.set(0, 1.73, -0.22);
-    visor.rotation.x = -0.15;
-    this.model.add(visor);
+    // Disco oscuro de fondo: hace que los radios claros destaquen.
+    const discGeometry = new THREE.CylinderGeometry(0.19, 0.19, 0.13, 18);
+    discGeometry.rotateZ(Math.PI / 2);
+    this.geometries.push(discGeometry);
 
-    const helmetStripe = new THREE.Mesh(
-      this.trackGeometry(new THREE.BoxGeometry(0.09, 0.1, 0.52)),
-      whiteMaterial,
-    );
-    helmetStripe.position.set(0, 1.94, -0.52);
-    this.model.add(helmetStripe);
+    const rimParts = [];
+    const ring = new THREE.TorusGeometry(0.184, 0.013, 6, 20);
+    ring.rotateY(Math.PI / 2);
+    rimParts.push(ring);
+    for (let i = 0; i < 5; i += 1) {
+      // Barras radiales en el plano de la rueda (eje X), repartidas en estrella.
+      const spoke = new THREE.BoxGeometry(0.07, 0.33, 0.04);
+      spoke.rotateX((i / 5) * Math.PI);
+      rimParts.push(spoke);
+    }
+    const hub = new THREE.CylinderGeometry(0.062, 0.062, 0.2, 10);
+    hub.rotateZ(Math.PI / 2);
+    rimParts.push(hub);
+    const rimGeometry = mergeGeometries(rimParts, false);
+    for (const part of rimParts) part.dispose();
+    rimGeometry.computeBoundingSphere();
+    this.geometries.push(rimGeometry);
 
-    // Ruedas: dos grupos anidados para girar y virar por separado.
-    const wheelPositions = [
-      { x: -shape.wheelTrack, z: shape.wheelBase, front: true },
+    const capGeometry = new THREE.CylinderGeometry(0.042, 0.042, 0.22, 10);
+    capGeometry.rotateZ(Math.PI / 2);
+    this.geometries.push(capGeometry);
+
+    const wheelPositions = [      { x: -shape.wheelTrack, z: shape.wheelBase, front: true },
       { x: shape.wheelTrack, z: shape.wheelBase, front: true },
       { x: -shape.wheelTrack, z: -shape.wheelBase, front: false },
       { x: shape.wheelTrack, z: -shape.wheelBase, front: false },
@@ -353,44 +877,32 @@ export class Kart {
 
     for (const spec of wheelPositions) {
       const steerGroup = new THREE.Group();
-      steerGroup.position.set(spec.x, 0.37, spec.z);
+      steerGroup.position.set(spec.x, shape.wheelRadius, spec.z);
       const spinGroup = new THREE.Group();
       steerGroup.add(spinGroup);
 
-      const tire = new THREE.Mesh(
-        this.trackGeometry(new THREE.CylinderGeometry(0.37, 0.37, 0.34, 16)),
-        tireMaterial,
-      );
-      tire.rotation.z = Math.PI / 2;
-      tire.castShadow = true;
-      spinGroup.add(tire);
+      const tireMesh = new THREE.Mesh(tireGeometry, rubber);
+      tireMesh.castShadow = true;
+      spinGroup.add(tireMesh);
 
-      const rim = new THREE.Mesh(
-        this.trackGeometry(new THREE.CylinderGeometry(0.2, 0.2, 0.355, 10)),
-        rimMaterial,
-      );
-      rim.rotation.z = Math.PI / 2;
-      spinGroup.add(rim);
+      const discMesh = new THREE.Mesh(discGeometry, carbon);
+      spinGroup.add(discMesh);
+
+      const rimMesh = new THREE.Mesh(rimGeometry, rim);
+      rimMesh.castShadow = true;
+      spinGroup.add(rimMesh);
+
+      const cap = new THREE.Mesh(capGeometry, accent);
+      spinGroup.add(cap);
 
       this.model.add(steerGroup);
-      this.wheels.push({ steer: steerGroup, spin: spinGroup, front: spec.front });
+      this.wheels.push({
+        steer: steerGroup,
+        spin: spinGroup,
+        front: spec.front,
+        baseY: shape.wheelRadius,
+      });
     }
-
-    // Pequeña sombra de contacto adicional (barata y siempre bajo el kart).
-    const shadow = new THREE.Mesh(
-      this.trackGeometry(new THREE.CircleGeometry(1.05, 20)),
-      new THREE.MeshBasicMaterial({
-        color: 0x000000,
-        transparent: true,
-        opacity: 0.16,
-        depthWrite: false,
-      }),
-    );
-    shadow.rotation.x = -Math.PI / 2;
-    shadow.position.y = -0.008;
-    shadow.scale.set(shape.chassisW / 1.7, (shape.chassisL / 2.45) * 1.55, 1);
-    // Va colgada del grupo (no del modelo) para que no se incline con la carrocería.
-    this.group.add(shadow);
   }
 
   makeMaterial(color, roughness = 0.6, metalness = 0) {
@@ -494,6 +1006,20 @@ export class Kart {
     this.impactTime = 0;
     this.impactDuration = 0;
     this.impactSteer = 0;
+    this.stunTime = 0;
+    this.stunDuration = 0;
+    this.stunImmunity = 0;
+    this.stunPhase = 0;
+    this.projectileGrace = 0;
+
+    this.height = 0;
+    this.verticalVelocity = 0;
+    this.airborne = false;
+    this.airTime = 0;
+    this.rampHeight = 0;
+    this.landingTime = 0;
+    this.justLanded = false;
+    this.featureCooldowns.clear();
 
     this.group.position.set(position.x, 0.02, position.z);
     this.group.rotation.y = this.heading;
@@ -599,7 +1125,7 @@ export class Kart {
   }
 
   /**
-   * Impacto de proyectil: ralentiza y desestabiliza durante un tiempo corto.
+   * Impacto de proyectil: ralentiza, desestabiliza y puede aturdir.
    * Devuelve false si la BARRERA está activa (protección completa).
    */
   applyImpact(def, side = 1) {
@@ -616,6 +1142,19 @@ export class Kart {
     // Pérdida extra, perceptible pero sin detener el kart.
     const baseLoss = def.impactSpeedLoss ?? 0.9;
     this.speed *= 1 - (1 - baseLoss) / Math.sqrt(Math.max(0.7, this.mass));
+
+    // Aturdimiento real: se refresca hasta el máximo, nunca se suma sin límite.
+    const stun = Math.min(def.stunTime ?? 0, CONFIG.stun.maxDuration);
+    if (stun > 0 && this.stunImmunity <= 0) {
+      const wasStunned = this.stunTime > 0;
+      this.stunDuration = Math.max(this.stunDuration, stun);
+      this.stunTime = Math.max(this.stunTime, stun);
+      this.stunPhase = 0;
+      if (!wasStunned) {
+        // Un golpe fuerte corta el derrape: no se regala turbo al perder el control.
+        this.cancelDrift();
+      }
+    }
     return true;
   }
 
@@ -633,7 +1172,13 @@ export class Kart {
     this.impactTime = 0;
     this.impactDuration = 0;
     this.impactSteer = 0;
+    this.stunTime = 0;
+    this.stunDuration = 0;
+    this.stunImmunity = 0;
+    this.stunPhase = 0;
+    this.projectileGrace = 0;
     this.aiProjectileCooldown = 0;
+    if (this.model) this.model.rotation.y = 0;
   }
 
   /**
@@ -641,6 +1186,37 @@ export class Kart {
    * Se usa al pausar, cambiar de pestaña o terminar, para que ningún efecto
    * quede congelado ni se pueda reutilizar al volver.
    */
+  /**
+   * Inicia un salto. `height` se conserva para que la rampa pueda lanzar
+   * desde su altura real y el kart caiga con gravedad propia.
+   */
+  startJump(verticalVelocity = CONFIG.air.launchBase) {
+    if (this.verticalVelocity > verticalVelocity) return;
+    this.airborne = true;
+    this.airTime = 0;
+    this.verticalVelocity = Math.max(0, verticalVelocity);
+    this.height = Math.max(this.height, 0.05);
+    this.driftActive = false;
+    this.driftCharge = 0;
+    this.driftSlip = 0;
+  }
+
+  setRampHeight(height) {
+    this.rampHeight = Math.max(0, height);
+    if (!this.airborne) this.height = this.rampHeight;
+  }
+
+  landFromAir() {
+    this.airborne = false;
+    this.height = 0;
+    this.verticalVelocity = 0;
+    this.airTime = 0;
+    this.rampHeight = 0;
+    this.landingTime = 0.26;
+    this.justLanded = true;
+    this.speed *= CONFIG.air.landingDrag;
+  }
+
   clearTransientState() {
     this.cancelDrift();
     this.endTurbo();
@@ -662,11 +1238,12 @@ export class Kart {
 
   step(dt, controls, track, raceTime) {
     const previousSpeed = this.speed;
-    const throttle = clamp(controls.throttle || 0, 0, 1);
-    const brake = clamp(controls.brake || 0, 0, 1);
-    const steer = clamp(controls.steer || 0, -1, 1);
+    let throttle = clamp(controls.throttle || 0, 0, 1);
+    let brake = clamp(controls.brake || 0, 0, 1);
+    let steer = clamp(controls.steer || 0, -1, 1);
 
     this.turboJustActivated = false;
+    this.justLanded = false;
 
     // El turbo se congela con la pausa porque updateRace deja de llamar a step().
     if (this.turboActive) {
@@ -696,6 +1273,46 @@ export class Kart {
         this.impactSteer = 0;
       }
     }
+    if (this.projectileGrace > 0) {
+      this.projectileGrace = Math.max(0, this.projectileGrace - dt);
+    }
+
+    // Aturdimiento: el control se reduce al principio y vuelve de forma
+    // progresiva. El kart nunca se congela: conserva inercia y algo de volante.
+    let stunRatio = 0;
+    if (this.stunTime > 0 && this.stunDuration > 0) {
+      stunRatio = clamp(this.stunTime / this.stunDuration, 0, 1);
+      this.stunPhase += dt * (6 + stunRatio * 7);
+      this.stunTime = Math.max(0, this.stunTime - dt);
+      if (this.stunTime === 0) {
+        this.stunDuration = 0;
+        this.stunImmunity = CONFIG.stun.immunity;
+      } else {
+        const control = 1 - CONFIG.stun.controlLoss * stunRatio;
+        steer *= control;
+        throttle *= 1 - CONFIG.stun.throttleLoss * stunRatio;
+        brake *= 1 - CONFIG.stun.throttleLoss * 0.6 * stunRatio;
+      }
+    } else if (this.stunImmunity > 0) {
+      this.stunImmunity = Math.max(0, this.stunImmunity - dt);
+    }
+    if (this.landingTime > 0) this.landingTime = Math.max(0, this.landingTime - dt);
+
+    // Física vertical: el kart mantiene su inercia horizontal, pero cae con
+    // gravedad propia. El control y la tracción se reducen en el aire.
+    if (this.airborne) {
+      this.airTime += dt;
+      this.verticalVelocity -= CONFIG.air.gravity * dt;
+      this.height += this.verticalVelocity * dt;
+      this.rampHeight = 0;
+      if (this.height <= 0) this.landFromAir();
+    } else if (this.rampHeight > 0) {
+      this.height = this.rampHeight;
+    } else {
+      this.height = 0;
+    }
+
+    const traction = this.airborne ? CONFIG.air.traction : 1;
 
     // Derrape: solo empieza con velocidad, asfalto y giro real.
     const driftHeld = Boolean(controls.drift);
@@ -705,6 +1322,7 @@ export class Kart {
     } else if (
       !this.driftActive &&
       !this.driftLock &&
+      !this.airborne &&
       this.speed > DRIFT.minSpeed &&
       !this.onGrass &&
       Math.abs(steer) > 0.12
@@ -763,13 +1381,16 @@ export class Kart {
     // Acelerar / frenar / retroceder.
     if (brake > 0) {
       if (this.speed > 0.1) {
-        this.speed = Math.max(0, this.speed - this.brakePower * brake * dt);
+        this.speed = Math.max(0, this.speed - this.brakePower * brake * traction * dt);
       } else {
-        this.speed = Math.max(-this.reverseMax, this.speed - KART.reverseAcceleration * brake * dt);
+        this.speed = Math.max(
+          -this.reverseMax,
+          this.speed - KART.reverseAcceleration * brake * traction * dt,
+        );
       }
     } else if (throttle > 0) {
       const boost = 1 + boostPower * 0.85;
-      this.speed += this.acceleration * throttle * boost * dt;
+      this.speed += this.acceleration * throttle * boost * traction * dt;
     } else {
       const drag = KART.coastDrag * dt;
       this.speed = Math.abs(this.speed) <= drag ? 0 : this.speed - Math.sign(this.speed) * drag;
@@ -794,7 +1415,8 @@ export class Kart {
       this.turnRate *
       (1 - 0.32 * speedRatio) *
       grip *
-      (this.driftActive ? DRIFT.turnBoost : 1);
+      (this.driftActive ? DRIFT.turnBoost : 1) *
+      (this.airborne ? CONFIG.air.steerControl : 1);
     this.heading -= steer * turnRate * Math.sign(this.speed || 1) * dt;
 
     // Un impacto desestabiliza el morro durante unos instantes, sin invertir el control.
@@ -802,6 +1424,13 @@ export class Kart {
       const impactRatio = this.impactTime / this.impactDuration;
       const impactGrip = clamp(speedAbs / 8, 0, 1);
       this.heading += this.impactSteer * impactRatio * impactGrip * dt * 1.8;
+    }
+
+    // El aturdimiento añade un vaivén de dirección que se apaga con la recuperación.
+    if (this.stunTime > 0 && stunRatio > 0) {
+      const wobbleGrip = clamp(speedAbs / 10, 0, 1);
+      this.heading +=
+        Math.sin(this.stunPhase) * CONFIG.stun.wobble * stunRatio * wobbleGrip * dt;
     }
 
     // Movimiento dependiente del tiempo real. Durante el derrape la trayectoria
@@ -814,7 +1443,7 @@ export class Kart {
     const projection = track.project(this.position);
     this.lateral = projection.lateral;
     this.trackS = projection.s;
-    this.onGrass = Math.abs(this.lateral) > track.halfWidth;
+    this.onGrass = !this.airborne && Math.abs(this.lateral) > track.halfWidth;
     this.wallContact = false;
 
     const limit = track.wallOffset - KART.wallLimitExtra;
@@ -833,7 +1462,7 @@ export class Kart {
       const target = forwardDot >= 0 ? tangentHeading : tangentHeading + Math.PI;
       this.heading = lerpAngle(this.heading, target, 0.55);
       this.lateral = clampedLateral;
-      this.onGrass = Math.abs(clampedLateral) > track.halfWidth;
+      this.onGrass = !this.airborne && Math.abs(clampedLateral) > track.halfWidth;
     }
 
     // Tiempo bloqueado: la IA lo usa para recuperarse sin teletransportes.
@@ -847,7 +1476,7 @@ export class Kart {
     this.updateProgress(track, raceTime);
     this.updateVisual(dt, steer, previousSpeed);
 
-    this.group.position.set(this.position.x, 0.02, this.position.z);
+    this.group.position.set(this.position.x, 0.02 + this.height, this.position.z);
     this.group.rotation.y = this.heading;
   }
 
@@ -909,12 +1538,43 @@ export class Kart {
 
     this.bobTime += dt * (3 + speedAbs * 0.25);
     const roughness = this.onGrass ? 0.045 : 0.012;
-    const bob = Math.sin(this.bobTime) * roughness * (0.35 + speedRatio);
+    const bob = this.airborne
+      ? 0
+      : Math.sin(this.bobTime) * roughness * (0.35 + speedRatio);
 
-    this.model.rotation.z = this.roll;
-    this.model.rotation.x = this.pitch;
-    this.model.position.y = bob;
-    this.model.position.x = Math.sin(this.bobTime * 0.5) * (this.onGrass ? 0.035 : 0.008);
+    // Sacudida de impacto: breve, lateral y decreciente; no altera la física.
+    const impactRatio =
+      this.impactTime > 0 && this.impactDuration > 0
+        ? clamp(this.impactTime / this.impactDuration, 0, 1)
+        : 0;
+    const jolt = impactRatio * impactRatio;
+
+    this.model.rotation.z = this.roll + this.impactSteer * jolt * 0.34;
+    this.model.rotation.x =
+      this.pitch + (this.airborne ? -this.verticalVelocity * 0.012 : 0) - jolt * 0.1;
+    this.model.position.y = bob + Math.sin(this.bobTime * 7) * jolt * 0.05;
+    this.model.position.x =
+      Math.sin(this.bobTime * 0.5) * (this.onGrass ? 0.035 : 0.008) +
+      Math.sin(this.bobTime * 11) * jolt * 0.07;
+
+    // Aterrizaje: compresión breve y elástica.
+    const squash = this.landingTime > 0
+      ? Math.sin((this.landingTime / 0.26) * Math.PI) * 0.075
+      : 0;
+    this.model.scale.set(1 + squash * 0.55, 1 - squash, 1 + squash * 0.55);
+
+    // La sombra de contacto se queda en el suelo aunque el kart salte.
+    if (this.shadow) {
+      this.shadow.position.y = -0.008 - this.height;
+      const airFade = clamp(1 - this.height / 5.5, 0.3, 1);
+      const spread = 1 + this.height * 0.03;
+      this.shadow.scale.set(
+        this.shadowBaseScale.x * spread,
+        this.shadowBaseScale.y * spread,
+        1,
+      );
+      this.shadowMaterial.opacity = 0.16 * airFade;
+    }
 
     // Llamas del turbo y del IMPULSO, con un parpadeo muy barato.
     if (this.turboFlames) {
@@ -926,6 +1586,7 @@ export class Kart {
         boostRatio = clamp(this.itemBoostTime / this.itemBoostDuration, 0, 1);
       }
       if (!this.turboActive && itemBoost) this.turboMaterial.color.setHex(0xffd23f);
+      else this.turboMaterial.color.setHex(0x5fe6ff);
 
       const flicker = 0.8 + Math.random() * 0.45;
       for (const flame of this.turboFlames) {
@@ -941,6 +1602,27 @@ export class Kart {
       if (this.barrierMesh.visible) {
         this.barrierMesh.rotation.y += dt * 1.4;
         this.barrierMaterial.opacity = 0.15 + Math.sin(this.bobTime * 3.2) * 0.06;
+      }
+    }
+
+    // Estrellas y balanceo de aturdimiento: comunicación visual clara y barata.
+    if (this.stunStars) {
+      const stunActive = this.stunTime > 0 && this.stunDuration > 0;
+      this.stunStars.visible = stunActive;
+      if (stunActive) {
+        const ratio = clamp(this.stunTime / this.stunDuration, 0, 1);
+        this.stunStars.rotation.y += dt * (3.5 + ratio * 5);
+        this.stunStars.position.y =
+          CONFIG.stun.starHeight + Math.sin(this.bobTime * 5) * 0.05;
+        for (const star of this.stunStars.children) {
+          star.rotation.z += dt * 5;
+          star.scale.setScalar(0.75 + ratio * 0.5);
+        }
+        this.stunMaterial.opacity = 0.35 + ratio * 0.5;
+        this.model.rotation.y = Math.sin(this.stunPhase * 0.75) * 0.16 * ratio;
+      } else {
+        this.stunMaterial.opacity = 0;
+        this.model.rotation.y = damp(this.model.rotation.y, jolt * this.impactSteer * 0.3, 9, dt);
       }
     }
   }

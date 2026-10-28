@@ -47,4 +47,22 @@ export const CONFIG = {
     lookHeight: 1.2,
     fov: 62,
   },
+  // Aturdimiento: nunca congela el kart, recorta el control y se recupera solo.
+  stun: {
+    maxDuration: 1.6,
+    immunity: 1,
+    controlLoss: 0.76,
+    throttleLoss: 0.4,
+    wobble: 1.7,
+    starHeight: 2.12,
+  },
+  // Saltos de rampa: gravedad propia y control reducido en el aire.
+  air: {
+    gravity: 24,
+    steerControl: 0.34,
+    traction: 0.12,
+    launchBase: 2.5,
+    launchPerSpeed: 0.09,
+    landingDrag: 0.96,
+  },
 };

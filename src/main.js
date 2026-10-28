@@ -1,5 +1,13 @@
 import './style.css';
 import { Game } from './game/Game.js';
+import {
+  prepareTrack,
+  restoreTrack,
+  runRaceSimulation,
+  runSimulationSuite,
+  SIM_MAPS,
+} from './game/simulation.js';
+import { DIFFICULTIES } from './game/difficulty.js';
 
 /**
  * Los controles táctiles solo se muestran en dispositivos de puntero grueso
@@ -30,6 +38,17 @@ try {
   game = new Game(container);
   // Expuesto para depurar desde la consola del navegador.
   window.turboCircuit = game;
+  // Arnés de equilibrio: carreras sin render con semilla fija para medir la IA.
+  // Se usa desde la consola (`turboCircuit.simulation.runSuite()`) y no
+  // interviene en la partida normal.
+  game.simulation = {
+    maps: SIM_MAPS,
+    difficulties: DIFFICULTIES,
+    prepareTrack: (mapId) => prepareTrack(game, mapId),
+    restoreTrack: (mapId) => restoreTrack(game, mapId),
+    run: (options) => runRaceSimulation(game, options),
+    runSuite: (options) => runSimulationSuite(game, options),
+  };
 } catch (error) {
   console.error('Turbo Circuit no ha podido iniciarse:', error);
   if (errorText) {

@@ -8,6 +8,8 @@ export const PLAYER_KARTS = [
   {
     id: 'rayo',
     name: 'Rayo',
+    number: 7,
+    classLabel: 'Equilibrado',
     color: 0xff6a1a,
     accent: 0xffd23f,
     bodyStyle: 'standard',
@@ -24,6 +26,8 @@ export const PLAYER_KARTS = [
   {
     id: 'centella',
     name: 'Centella',
+    number: 21,
+    classLabel: 'Velocidad',
     color: 0xff3d6e,
     accent: 0xffd23f,
     bodyStyle: 'speedster',
@@ -40,6 +44,8 @@ export const PLAYER_KARTS = [
   {
     id: 'lira',
     name: 'Lira',
+    number: 44,
+    classLabel: 'Agilidad',
     color: 0x2fe0a4,
     accent: 0xd8fff2,
     bodyStyle: 'agile',
@@ -56,6 +62,8 @@ export const PLAYER_KARTS = [
   {
     id: 'titan',
     name: 'Titán',
+    number: 88,
+    classLabel: 'Potencia',
     color: 0x4b6fff,
     accent: 0xa9c8ff,
     bodyStyle: 'heavy',
@@ -76,6 +84,7 @@ export const AI_KARTS = [
   {
     id: 'vega',
     name: 'Vega',
+    number: 3,
     color: 0xbd3bff,
     accent: 0xffa4f3,
     bodyStyle: 'speedster',
@@ -98,6 +107,7 @@ export const AI_KARTS = [
   {
     id: 'nilo',
     name: 'Nilo',
+    number: 12,
     color: 0x12c7d8,
     accent: 0xc4fbff,
     bodyStyle: 'agile',
@@ -120,6 +130,7 @@ export const AI_KARTS = [
   {
     id: 'musgo',
     name: 'Musgo',
+    number: 66,
     color: 0x82ce3d,
     accent: 0xfff0a1,
     bodyStyle: 'heavy',

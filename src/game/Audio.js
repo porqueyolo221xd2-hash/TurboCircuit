@@ -178,6 +178,56 @@ export class AudioManager {
     oscillator.stop(now + 0.27);
   }
 
+  /** Disparo de la FURIA: ráfaga más grave y agresiva que el pulso normal. */
+  furia(volumeScale = 1) {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.01;
+    const volume = Math.max(0.01, Math.min(1, volumeScale));
+    this.tone(920, now, 0.06, 0.075 * volume, 'sawtooth');
+    this.tone(460, now + 0.035, 0.16, 0.065 * volume, 'square');
+    this.tone(230, now + 0.11, 0.2, 0.05 * volume, 'sawtooth');
+  }
+
+  /** Clic metálico al desplegar una mina. */
+  mine() {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.01;
+    this.tone(190, now, 0.05, 0.06, 'square');
+    this.tone(96, now + 0.04, 0.1, 0.05, 'triangle');
+  }
+
+  /** Explosión arcade de la mina: grave, corta y sin archivos externos. */
+  mineBoom() {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.01;
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.setValueAtTime(150, now);
+    oscillator.frequency.exponentialRampToValueAtTime(36, now + 0.38);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.11, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.44);
+    oscillator.connect(gain);
+    gain.connect(this.master);
+    oscillator.start(now);
+    oscillator.stop(now + 0.47);
+    this.tone(78, now + 0.04, 0.3, 0.05, 'square');
+  }
+
+  /** Aturdimiento: pequeño tono descendente que acompaña a las estrellas. */
+  stun() {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.01;
+    this.tone(520, now, 0.1, 0.06, 'triangle');
+    this.tone(330, now + 0.08, 0.18, 0.05, 'square');
+    this.tone(220, now + 0.18, 0.22, 0.04, 'triangle');
+  }
+
   item(kind) {
     const ctx = this.ensure();
     if (!ctx) return;
@@ -190,6 +240,10 @@ export class AudioManager {
       this.tone(294, now + 0.12, 0.22, 0.07, 'square');
     } else if (kind === 'PULSO_IMPACTO') {
       this.projectile();
+    } else if (kind === 'FURIA') {
+      this.furia();
+    } else if (kind === 'MINA') {
+      this.mine();
     } else {
       this.tone(330, now, 0.12, 0.07, 'triangle');
       this.tone(440, now + 0.1, 0.2, 0.07, 'triangle');

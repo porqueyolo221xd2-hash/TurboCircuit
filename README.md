@@ -72,10 +72,12 @@ La terminal mostrará una dirección `Network` similar a `http://192.168.1.40:51
 navegador del móvil. Si no carga, revisa que el firewall de Windows permita Node.js en redes
 privadas. Para una prueba realista conviene publicar la build (ver sección 7) y abrirla por `https`.
 
-En el menú puedes elegir **circuito** (COSTA TROPICAL, MONTAÑA o CIUDAD FUTURISTA), **kart**
-(Rayo, Centella, Lira o Titán) y **dificultad** antes de empezar. La vista previa 3D del kart se
-actualiza al instante. Las tres elecciones se guardan en `localStorage` y se recuperan en la próxima
-visita; si el navegador las bloquea, el juego usa valores seguros por defecto.
+En el menú puedes elegir **circuito** (seis trazados, desde COSTA TROPICAL hasta ESTACIÓN
+ORBITAL), **kart** (Rayo, Centella, Lira o Titán) y **dificultad** antes de empezar. La vista previa
+3D del kart se actualiza al instante. Al empezar de cero solo están disponibles **Rayo** y **COSTA
+TROPICAL**; el resto se desbloquea en la tienda con monedas. La selección, el saldo y los desbloqueos
+se guardan en `localStorage` y se recuperan en la próxima visita; si el navegador los bloquea, el
+juego usa valores seguros por defecto.
 
 ### Controles
 
@@ -162,12 +164,15 @@ Actions ya aplica `VITE_BASE=/TurboCircuit/` automáticamente; no hay que editar
   selector de dificultad (FÁCIL, NORMAL, DIFÍCIL) y botón **Empezar carrera**. Circuito, kart y
   dificultad se guardan en `localStorage` y se aplican en la siguiente carrera.
 - Cuenta atrás 3, 2, 1, ¡YA! con sonido.
-- Tres circuitos jugables con trazado, anchura, minimapa, cajas de objetos, decoración y ambiente
+- Seis circuitos jugables con trazado, anchura, minimapa, cajas de objetos, decoración y ambiente
   propios. La física, las vueltas, la clasificación y la IA son compartidas:
   - **COSTA TROPICAL**: curvas amplias, arena, palmeras, playa y mar.
   - **MONTAÑA**: trazado más estrecho y técnico entre pinos, rocas, lago y montañas.
   - **CIUDAD FUTURISTA**: circuito nocturno de rectas largas y chicanes, con edificios iluminados,
     neón y muros oscuros.
+  - **DISTRITO NEÓN**: noche urbana con pianos magenta, paneles y zonas de turbo.
+  - **CAÑÓN SALVAJE**: rampas, saltos, rocas y mesetas.
+  - **ESTACIÓN ORBITAL**: plataformas, puertas móviles y ambiente espacial.
 - Cuatro karts jugables, cada uno con física y silueta propias. Ninguno es mejor en todo:
   - **Rayo** (equilibrado), **Centella** (mucha punta, menos agarre), **Lira** (muy ágil y rápida de
     aceleración, menor velocidad punta) y **Titán** (pesado, acelera menos pero aguanta mejor los
@@ -227,7 +232,35 @@ Actions ya aplica `VITE_BASE=/TurboCircuit/` automáticamente; no hay que editar
 - Sonido generado con WebAudio (motor, pitidos, turbo, recogida de objetos y melodía final) sin
   archivos externos.
 
-No se ha añadido multijugador, cuentas, tienda, monedas, bases de datos ni servicios externos.
+### Monedas, tienda y desbloqueos
+
+- **Monedas por victoria:** 20 en FÁCIL, 40 en NORMAL y 70 en DIFÍCIL. Perder no paga. Una carrera
+  solo puede cobrar una vez, aunque se recargue la pantalla de resultados.
+- **Inicio:** un kart (**Rayo**), un circuito (**COSTA TROPICAL**) y **0 monedas**. No hay
+  compensación inicial. Si existe una partida antigua, se migra sin borrar las claves anteriores: el
+  kart y el circuito que ya estaban seleccionados se regalan como compensación documentada.
+- **Tienda:** se abre con el chip de monedas del menú o al pulsar contenido bloqueado. Tiene dos
+  pestañas, vista previa 3D del kart, trazado del circuito, descripción, precio, estado
+  (bloqueado/desbloqueado/equipado) y botones de compra o equipar. El saldo siempre está visible.
+- **Persistencia:** una única clave `turbo-circuit-progress-v1` guarda saldo, karts, circuitos,
+  selección y estadísticas. Los datos corruptos se reparan campo a campo; nunca se permite saldo
+  negativo. Si el navegador no puede escribir, la compra se deshace y se avisa en la tienda.
+
+Precios centralizados en `src/game/economy.js` y victorias necesarias para comprar cada elemento:
+
+| Contenido | Precio | FÁCIL (20) | NORMAL (40) | DIFÍCIL (70) |
+| --- | ---: | ---: | ---: | ---: |
+| Centella | 150 | 8 | 4 | 3 |
+| Lira | 260 | 13 | 7 | 4 |
+| Titán | 400 | 20 | 10 | 6 |
+| Montaña | 120 | 6 | 3 | 2 |
+| Ciudad Futurista | 220 | 11 | 6 | 4 |
+| Distrito Neón | 320 | 16 | 8 | 5 |
+| Cañón Salvaje | 440 | 22 | 11 | 7 |
+| Estación Orbital | 560 | 28 | 14 | 8 |
+
+El modo difícil es el que mejor paga por carrera; desbloquear todo el contenido cuesta 2.470 monedas
+en total. No se ha añadido multijugador, cuentas, pagos ni servicios externos.
 
 ---
 
@@ -249,10 +282,13 @@ Turbo Circuit/
    └─ game/
       ├─ Game.js              Escena, estados, carrera, cámara y bucle principal
       ├─ Track.js             Pista compartida y decoración según el mapa
-      ├─ maps.js              Definición de los tres circuitos y persistencia
-      ├─ Kart.js              Modelo del kart, física, derrape y efectos
-      ├─ karts.js             Karts jugables, rivales y persistencia
-      ├─ KartPreview.js       Vista previa 3D del kart en el menú
+      ├─ maps.js              Definición de los seis circuitos y persistencia antigua
+      ├─ Kart.js              Modelo visual, física, derrape y efectos
+      ├─ karts.js             Karts jugables, rivales y persistencia antigua
+      ├─ KartPreview.js       Vista previa 3D del kart en el menú y la tienda
+      ├─ economy.js           Monedas, precios, compras, desbloqueos y migración
+      ├─ Shop.js              Garaje/tienda: tarjetas, vista previa y estados
+      ├─ simulation.js        Arnés de carreras con semilla para equilibrar la IA
       ├─ AIController.js      Perfiles de IA, trazada, adelantamientos y recuperación
       ├─ ItemSystem.js        Cajas, objetos, ondas, proyectiles y decisiones de la IA
       ├─ items.js             Definición de IMPULSO, PULSO, BARRERA y PULSO DE IMPACTO
@@ -378,7 +414,47 @@ Netlify no hay que cambiar nada.
 
 ## 9. Estado de las pruebas
 
-### Comprobado en esta versión
+### Comprobado en esta actualización
+
+- `npm.cmd run build` correcto con Vite 8.3.5: 28 módulos, `dist/assets/index-*.js` ≈ 742 kB
+  (196 kB gzip) y CSS ≈ 65 kB. Solo aparece el aviso habitual de chunk > 500 kB.
+- **Economía y tienda (Chromium, compilación de producción):**
+  - Perfil nuevo con `rayo` + `coast`, 0 monedas y el resto bloqueado en el menú y en la tienda.
+  - Victoria FÁCIL/NORMAL/DIFÍCIL: +20/+40/+70 monedas, con posición, dificultad, monedas, saldo y
+    botón de menú en la pantalla final. Una segunda llamada a `finishRace()` no vuelve a cobrar.
+  - Derrota en DIFÍCIL: 0 monedas, mensaje para volver a intentarlo y saldo intacto.
+  - Recarga del navegador: saldo, karts, circuitos y selección se conservan.
+  - Compra con saldo insuficiente rechazada ("Te faltan N monedas"), compra correcta, segundo intento
+    rechazado ("Ya lo tienes desbloqueado") y saldo sin negativos.
+  - Selección de contenido bloqueado rechazada; pulsar un kart o circuito bloqueado abre la tienda en
+    esa ficha sin cambiar la selección actual.
+  - Migración desde `turbo-circuit-kart-v1`/`turbo-circuit-map-v1`: la selección antigua se conserva,
+    se regala el desbloqueo y las claves viejas no se modifican.
+- **Objetos, proyectiles y controles:** se usaron IMPULSO, PULSO, BARRERA, MINA, FURIA y PULSO DE
+  IMPACTO; cada uno se consume, produce su efecto y no deja el objeto equipado. El botón táctil de
+  gas activa y libera el acelerador con Pointer Events y el teclado sigue respondiendo a acelerar,
+  frenar y girar.
+- **Recursos:** tras cuatro ciclos completos por los seis circuitos, `renderer.info.memory` se
+  mantiene estable (134 geometrías, 25 texturas, 19–21 programas). Se corrigió `Track.dispose()`
+  para liberar también `bumpMap`, `emissiveMap` y el resto de ranuras de textura; antes crecía una
+  textura por circuito y vuelta. La consola no muestra errores ni avisos.
+- **Rendimiento:** 180 fotogramas de carrera en DISTRITO NEÓN a 800 × 620: 17,55 ms de media
+  (≈57 FPS en el navegador de pruebas), 369 llamadas de dibujo y 84.840 triángulos.
+- **Dificultad:** 54 carreras simuladas (6 circuitos × 3 dificultades × 3 semillas: 11, 23 y 37),
+  sustituyendo al jugador por un bot de referencia fijo en NORMAL:
+  - FÁCIL: 18/18 victorias, posición media 1,00, rivales +5,06 s/vuelta.
+  - NORMAL: 9/18 victorias (50 %), posición media 2,11, rivales +0,31 s/vuelta.
+  - DIFÍCIL: 0/18 victorias, posición media 3,72, rivales −0,65 s/vuelta; el bot solo pudo ser 2.º
+    en COSTA (semilla 23) y 3.º en varias carreras.
+  - Derrape medio de los rivales: 3,99 / 13,38 / 15,15 s por carrera; objetos recogidos: 3,48 /
+    4,72 / 4,94; adelantamientos: 2,52 / 3,78 / 3,89. Los rivales no se teleportan ni reciben
+    velocidad gratis: la ventaja sale de la física, la frenada y la trazada.
+
+### Histórico de versiones anteriores
+
+> Los datos de esta sección corresponden a versiones anteriores del juego y se conservan como
+> referencia. Por eso mencionan tres circuitos, cuatro karts o claves de guardado antiguas; la versión
+> actual tiene seis circuitos, tienda con monedas y una única clave `turbo-circuit-progress-v1`.
 
 - `npm install` ya estaba hecho y se ha mantenido la misma instalación con Node.js 24 y npm 11.
 - `npm.cmd run build` ejecutado correctamente con Vite 8 después de integrar mapas, karts, vista
@@ -449,8 +525,8 @@ Netlify no hay que cambiar nada.
 
 ### Pendiente de probar a mano
 
-- Aspecto real de los tres circuitos (decoración, iluminación nocturna de la ciudad, mar y montaña),
-  encuadre de la cámara cenital del menú y legibilidad del minimapa de cada mapa.
+- Aspecto real de los seis circuitos (decoración, iluminación nocturna, mar, montaña, cañón y
+  orbital), encuadre de la cámara cenital del menú y legibilidad del minimapa de cada mapa.
 - Funcionamiento visual de la vista previa 3D del kart, cambio entre los cuatro modelos y ajuste del
   canvas en ventanas estrechas.
 - Prueba en un móvil o tableta físicos (Android/iPhone): latencia real del táctil, zoom y scroll del
@@ -469,8 +545,9 @@ Netlify no hay que cambiar nada.
 - Pausa en mitad de un derrape, turbo o proyectil, y cambio de pestaña con un objeto activo. Los
   botones **Volver a jugar**, **Reiniciar** y **Menú** sí se recorrieron en Chromium, pero no con
   efectos a medias.
-- Equilibrio real de la dificultad: que FÁCIL permita aprender y ganar, NORMAL compita y DIFÍCIL
-  exija una buena conducción sin resultar injusto.
+- Sensación real de dificultad con conductor humano. El equilibrio ya se midió con 54 carreras
+  simuladas (ver arriba), pero falta comprobar a mano que FÁCIL permita aprender y ganar, NORMAL
+  compita y DIFÍCIL exija dominar trazadas y objetos sin resultar injusto.
 - Calidad subjetiva del audio nuevo (turbo, disparo, impacto, recogida y uso de objetos).
 
 No se ha probado en Firefox, Safari ni en dispositivos físicos (móviles o tablets), así que la

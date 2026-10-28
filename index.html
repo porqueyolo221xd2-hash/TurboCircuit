@@ -13,26 +13,34 @@
   <body>
     <main id="app">
       <div id="scene" aria-hidden="true"></div>
+      <div class="screen-glow" aria-hidden="true"></div>
       <div id="speed-fx" class="speed-fx" aria-hidden="true"></div>
       <div id="impact-fx" class="impact-fx" aria-hidden="true"></div>
+      <div id="stun-fx" class="stun-fx" aria-hidden="true"></div>
+      <div id="launch-fx" class="launch-fx" aria-hidden="true"></div>
 
       <!-- ===================== HUD ===================== -->
       <section id="hud" class="hud hidden" aria-label="Información de carrera">
         <div class="hud-top">
-          <div class="stat-card lap-card">
-            <span class="label">VUELTA</span>
-            <span class="value"><span id="hud-lap">1</span><small id="hud-lap-total">/3</small></span>
-          </div>
+          <div class="hud-cluster">
+            <div class="stat-card lap-card">
+              <span class="label">VUELTA</span>
+              <span class="value"><span id="hud-lap">1</span><small id="hud-lap-total">/3</small></span>
+              <i class="stat-accent"></i>
+            </div>
 
-          <div class="stat-card pos-card">
-            <span class="label">POSICIÓN</span>
-            <span class="value"><span id="hud-position">4</span><small>º</small></span>
+            <div class="stat-card pos-card" id="position-card">
+              <span class="label">POSICIÓN</span>
+              <span class="value"><span id="hud-position">4</span><small>º</small></span>
+              <i class="stat-accent"></i>
+            </div>
           </div>
 
           <div class="stat-card time-card">
             <span class="label">TIEMPO TOTAL</span>
             <span class="value mono" id="hud-time">00:00.000</span>
             <span class="sub">Mejor vuelta <b id="hud-best" class="mono">—</b></span>
+            <i class="stat-accent"></i>
           </div>
 
           <div class="hud-actions">
@@ -48,8 +56,11 @@
 
         <div class="hud-bottom">
           <div class="minimap-card">
+            <div class="minimap-head">
+              <span class="map-label" id="hud-map-name">PISTA</span>
+              <span class="minimap-live"><i></i> LIVE</span>
+            </div>
             <canvas id="minimap" width="336" height="336" aria-hidden="true"></canvas>
-            <span class="map-label" id="hud-map-name">PISTA</span>
           </div>
 
           <div class="lap-time-card">
@@ -58,8 +69,11 @@
           </div>
 
           <div class="speedo-card">
-            <span class="label">VELOCIDAD</span>
-            <div class="speed-value"><span id="hud-speed">0</span><small>km/h</small></div>
+            <div class="speedo-head">
+              <span class="label">VELOCIDAD</span>
+              <span class="speed-unit">KM/H</span>
+            </div>
+            <div class="speed-value"><span id="hud-speed">0</span></div>
             <div class="speed-bar"><i id="hud-speed-bar"></i></div>
             <div class="turbo-meter" id="turbo-meter">
               <span class="turbo-label">TURBO <b id="turbo-state">ESPACIO</b></span>
@@ -81,6 +95,20 @@
         </div>
 
         <div id="offroad" class="offroad">¡FUERA DE PISTA!</div>
+
+        <div id="lap-toast" class="lap-toast" role="status" aria-live="polite">
+          <span>VUELTA</span>
+          <b id="lap-toast-value">2 / 3</b>
+        </div>
+
+        <div id="stun-banner" class="stun-banner hidden" role="status" aria-live="assertive">
+          <span class="stun-icon" aria-hidden="true">✦</span>
+          <span class="stun-copy">
+            <b>SISTEMAS ALTERADOS</b>
+            <small>Recuperando el control…</small>
+          </span>
+          <i class="stun-bar"><b id="stun-fill"></b></i>
+        </div>
 
         <div id="controls-hint" class="controls-hint">
           <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> o flechas
@@ -166,32 +194,68 @@
       <!-- ===================== MENÚ ===================== -->
       <section id="screen-menu" class="overlay menu-overlay">
         <div class="menu-panel">
-          <div class="checker-strip"></div>
-          <p class="eyebrow">CARRERA ARCADE 3D</p>
-          <h1 class="game-title"><span class="title-a">TURBO</span><span class="title-b">CIRCUIT</span></h1>
-          <p class="tagline">Cuatro karts. Tres circuitos. Tres vueltas. Una sola línea de meta.</p>
+          <div class="checker-strip top"></div>
+
+          <div class="menu-topbar">
+            <span class="menu-chip"><i class="live-dot"></i> ARCADE RACING</span>
+            <span class="menu-chips">
+              <span>3 VUELTAS</span>
+              <span>6 CIRCUITOS</span>
+              <span>4 PILOTOS</span>
+              <button id="btn-shop" class="coin-chip coin-chip-button" type="button" title="Abrir garaje y tienda">
+                <i class="coin-icon" aria-hidden="true"></i>
+                <b id="menu-coins">0</b>
+                <span class="coin-chip-label">TIENDA</span>
+              </button>
+            </span>
+          </div>
+
+          <header class="menu-hero">
+            <p class="eyebrow">ELIGE TU MÁQUINA · DOMINA EL ASFALTO</p>
+            <h1 class="game-title"><span class="title-a">TURBO</span><span class="title-b">CIRCUIT</span></h1>
+            <p class="tagline">Cuatro karts, seis circuitos y una sola línea de meta. Derrapa, dispara y adelanta.</p>
+          </header>
 
           <div class="menu-layout">
             <div class="menu-column">
-              <div class="setup-block">
+              <div class="setup-block map-setup">
                 <div class="setup-head">
-                  <h2>CIRCUITO</h2>
+                  <h2><span class="head-index">01</span> CIRCUITO</h2>
                   <span id="map-current" class="setup-current">COSTA TROPICAL</span>
                 </div>
                 <div class="map-options" id="map-options" role="group" aria-label="Elegir circuito">
-                  <button class="map-btn" type="button" data-map="coast" aria-pressed="false">
-                    <span class="map-dot" style="--map-color: #2fd7e8"></span>
+                  <button class="map-btn" type="button" data-map="coast" aria-pressed="false" style="--map-color: #2fd7e8">
+                    <span class="map-index" aria-hidden="true">01</span>
                     <span class="map-copy"><b>COSTA TROPICAL</b><small>Curvas amplias junto al mar</small></span>
+                    <span class="map-check" aria-hidden="true">✓</span>
                   </button>
-                  <button class="map-btn" type="button" data-map="mountain" aria-pressed="false">
-                    <span class="map-dot" style="--map-color: #9be36b"></span>
+                  <button class="map-btn" type="button" data-map="mountain" aria-pressed="false" style="--map-color: #9be36b">
+                    <span class="map-index" aria-hidden="true">02</span>
                     <span class="map-copy"><b>MONTAÑA</b><small>Trazado técnico entre pinos</small></span>
+                    <span class="map-check" aria-hidden="true">✓</span>
                   </button>
-                  <button class="map-btn" type="button" data-map="city" aria-pressed="false">
-                    <span class="map-dot" style="--map-color: #b66cff"></span>
-                    <span class="map-copy"><b>CIUDAD FUTURISTA</b><small>Neón, rectas y curvas rápidas</small></span>
+                  <button class="map-btn" type="button" data-map="city" aria-pressed="false" style="--map-color: #b66cff">
+                    <span class="map-index" aria-hidden="true">03</span>
+                    <span class="map-copy"><b>CIUDAD FUTURISTA</b><small>Neón, rectas y chicanes</small></span>
+                    <span class="map-check" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="map-btn" type="button" data-map="neon" aria-pressed="false" style="--map-color: #ff3fd0">
+                    <span class="map-index" aria-hidden="true">04</span>
+                    <span class="map-copy"><b>DISTRITO NEÓN</b><small>Noche urbana y zonas de turbo</small></span>
+                    <span class="map-check" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="map-btn" type="button" data-map="canyon" aria-pressed="false" style="--map-color: #ffae42">
+                    <span class="map-index" aria-hidden="true">05</span>
+                    <span class="map-copy"><b>CAÑÓN SALVAJE</b><small>Rampas, saltos y rocas</small></span>
+                    <span class="map-check" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="map-btn" type="button" data-map="orbital" aria-pressed="false" style="--map-color: #5fffe0">
+                    <span class="map-index" aria-hidden="true">06</span>
+                    <span class="map-copy"><b>ESTACIÓN ORBITAL</b><small>Plataformas y puertas móviles</small></span>
+                    <span class="map-check" aria-hidden="true">✓</span>
                   </button>
                 </div>
+                <div id="map-features" class="map-features" aria-live="polite"></div>
                 <p class="setup-desc" id="map-desc">
                   Un circuito abierto y rápido entre palmeras y agua.
                 </p>
@@ -199,7 +263,7 @@
 
               <div class="difficulty-block">
                 <div class="difficulty-head">
-                  <h2>DIFICULTAD</h2>
+                  <h2><span class="head-index">02</span> DIFICULTAD</h2>
                   <span id="difficulty-current" class="difficulty-current">NORMAL</span>
                 </div>
                 <div
@@ -227,10 +291,11 @@
             <div class="menu-column">
               <div class="setup-block kart-setup">
                 <div class="setup-head">
-                  <h2>TU KART</h2>
+                  <h2><span class="head-index">03</span> TU KART</h2>
                   <span id="kart-current" class="setup-current">RAYO</span>
                 </div>
                 <div class="kart-stage">
+                  <span class="kart-number" id="kart-number" aria-hidden="true">07</span>
                   <canvas
                     id="kart-preview"
                     class="kart-preview"
@@ -241,6 +306,7 @@
                   <div class="kart-stage-copy">
                     <b id="kart-tagline">El equilibrado</b>
                     <small id="kart-desc">Rápido, noble y fácil de leer.</small>
+                    <span class="kart-style" id="kart-style">STANDARD</span>
                   </div>
                 </div>
                 <div class="kart-nav">
@@ -311,7 +377,7 @@
                   <ul class="tips">
                     <li>Derrapa en las curvas para cargar turbo.</li>
                     <li>Recoge cajas y usa el objeto con <kbd>E</kbd> o el botón <b>OBJETO</b>.</li>
-                    <li>El césped y los muros te frenan.</li>
+                    <li>Esquiva obstáculos y aprovecha las zonas de aceleración.</li>
                   </ul>
                 </div>
               </div>
@@ -320,13 +386,63 @@
 
           <div class="menu-actions">
             <button id="btn-start" class="btn btn-primary" type="button">
-              Empezar carrera <span class="btn-icon">▶</span>
+              <span class="btn-kicker">LISTO PARA LA PARRILLA</span>
+              <span class="btn-label">Empezar carrera <span class="btn-icon">▶</span></span>
             </button>
             <p class="footnote">
               Pulsa <kbd>Enter</kbd> o el botón. En móvil, conduce con los botones en pantalla.
             </p>
           </div>
           <div class="checker-strip bottom"></div>
+        </div>
+      </section>
+
+      <!-- ===================== TIENDA / GARAJE ===================== -->
+      <section id="screen-shop" class="overlay hidden">
+        <div class="panel shop-panel">
+          <div class="shop-top">
+            <button id="btn-shop-back" class="icon-btn shop-back" type="button" aria-label="Volver al menú">
+              ←
+            </button>
+            <div class="shop-title">
+              <p class="eyebrow">GARAJE Y TIENDA</p>
+              <h2 class="panel-title">Amplía tu equipo</h2>
+            </div>
+            <div class="coin-chip coin-chip-large" id="shop-coins-chip">
+              <i class="coin-icon" aria-hidden="true"></i>
+              <b id="shop-coins">0</b>
+            </div>
+          </div>
+
+          <div class="shop-tabs" role="tablist" aria-label="Secciones de la tienda">
+            <button class="shop-tab is-selected" type="button" data-shop-tab="karts" role="tab" aria-selected="true">
+              KARTS
+            </button>
+            <button class="shop-tab" type="button" data-shop-tab="maps" role="tab" aria-selected="false">
+              CIRCUITOS
+            </button>
+          </div>
+
+          <div class="shop-body">
+            <div class="shop-preview" id="shop-preview">
+              <div class="shop-preview-stage" id="shop-preview-stage">
+                <canvas id="shop-preview-canvas" width="460" height="300" aria-label="Vista previa 3D del kart seleccionado"></canvas>
+                <canvas id="shop-map-canvas" class="hidden" width="460" height="300" aria-label="Trazado del circuito seleccionado"></canvas>
+                <span class="shop-preview-tag" id="shop-preview-tag">KART</span>
+              </div>
+              <div class="shop-preview-copy">
+                <b id="shop-preview-name">Rayo</b>
+                <small id="shop-preview-desc">Rápido, noble y fácil de leer.</small>
+                <div class="kart-stats" id="shop-preview-stats"></div>
+                <small id="shop-preview-hint" class="shop-preview-hint"></small>
+              </div>
+            </div>
+            <div class="shop-grid" id="shop-grid" role="list"></div>
+          </div>
+
+          <p class="shop-note" id="shop-note" role="status" aria-live="polite">
+            Gana carreras para conseguir monedas. Solo la victoria paga.
+          </p>
         </div>
       </section>
 
@@ -352,12 +468,32 @@
       <!-- ===================== RESULTADOS ===================== -->
       <section id="screen-results" class="overlay hidden">
         <div class="panel results-panel">
+          <div class="panel-glow" aria-hidden="true"></div>
           <p class="eyebrow">RESULTADO FINAL · 3 VUELTAS</p>
           <h2 class="panel-title" id="results-title">¡Carrera terminada!</h2>
 
           <div class="result-hero">
             <span id="results-position" class="big-position">1º</span>
             <span id="results-stars" class="stars">★★★</span>
+          </div>
+
+          <div class="reward-block" id="results-reward">
+            <span class="reward-burst" aria-hidden="true">
+              <i class="coin-icon"></i>
+              <i class="coin-icon"></i>
+              <i class="coin-icon"></i>
+              <i class="coin-icon"></i>
+              <i class="coin-icon"></i>
+            </span>
+            <div class="reward-main">
+              <i class="coin-icon coin-icon-big" aria-hidden="true"></i>
+              <b id="results-coins">+0</b>
+              <span id="results-reward-label">monedas ganadas</span>
+            </div>
+            <div class="reward-balance">
+              Saldo total <b id="results-balance">0</b>
+              <span id="results-difficulty" class="reward-difficulty">NORMAL</span>
+            </div>
           </div>
 
           <table class="results-table">
