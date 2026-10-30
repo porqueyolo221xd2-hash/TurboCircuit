@@ -231,6 +231,15 @@ export class Kart {
     this.lateral = 0;
     this.lastTrackS = 0;
     this.progress = 0;
+    // Ruta activa (null = trazado principal) y altura del asfalto bajo el kart.
+    this.route = null;
+    this.groundY = 0;
+    this.checkpointMask = 0;
+    this.checkpointCount = 0;
+    this.invalidLaps = 0;
+    this.aiRouteIntent = null;
+    this.aiRouteCommitS = null;
+    this.aiRoutePlan = new Map();
 
     this.lap = 1;
     this.lapStartTime = null;
@@ -268,6 +277,8 @@ export class Kart {
     this.turboLevel = 0;
     this.turboPower = 0;
     this.turboJustActivated = false;
+    this.turboJustEnded = false;
+    this.turboCooldown = 0;
 
     // Objetos: inventario de un solo uso y efectos con temporizador propio.
     this.item = null;
@@ -955,6 +966,14 @@ export class Kart {
     this.lastTrackS = this.trackS;
     this.progress = -back;
     this.lateral = lateral;
+    this.route = null;
+    this.groundY = Number.isFinite(position.y) ? position.y : 0;
+    this.checkpointMask = 0;
+    this.checkpointCount = 0;
+    this.invalidLaps = 0;
+    this.aiRouteIntent = null;
+    this.aiRouteCommitS = null;
+    if (this.aiRoutePlan) this.aiRoutePlan.clear();
     this.onGrass = false;
     this.wallContact = false;
     this.stuckTime = 0;
@@ -992,6 +1011,8 @@ export class Kart {
     this.turboLevel = 0;
     this.turboPower = 0;
     this.turboJustActivated = false;
+    this.turboJustEnded = false;
+    this.turboCooldown = 0;
 
     this.item = null;
     this.itemUseCooldown = 0;
@@ -1021,7 +1042,7 @@ export class Kart {
     this.justLanded = false;
     this.featureCooldowns.clear();
 
-    this.group.position.set(position.x, 0.02, position.z);
+    this.group.position.set(position.x, this.groundY + 0.02, position.z);
     this.group.rotation.y = this.heading;
     this.model.rotation.set(0, 0, 0);
   }
@@ -1063,6 +1084,7 @@ export class Kart {
   }
 
   startTurbo(level) {
+    if (this.turboActive) return;
     const strong = level >= 2;
     this.turboLevel = strong ? 2 : 1;
     this.turboDuration = strong ? DRIFT.strongDuration : DRIFT.shortDuration;
@@ -1070,6 +1092,7 @@ export class Kart {
     this.turboPower = strong ? DRIFT.strongPower : DRIFT.shortPower;
     this.turboActive = true;
     this.turboJustActivated = true;
+    this.turboJustEnded = false;
     // Pequeño empujón inicial; el límite real se aplica en step().
     this.speed += strong ? 1.8 : 1.1;
     if (this.turboMaterial) {
@@ -1078,11 +1101,17 @@ export class Kart {
   }
 
   endTurbo() {
+    const wasActive = this.turboActive;
     this.turboActive = false;
     this.turboTime = 0;
     this.turboDuration = 0;
     this.turboLevel = 0;
     this.turboPower = 0;
+    if (wasActive) {
+      // Pausa breve obligatoria: evita reencadenar impulsos sin cargar de nuevo.
+      this.turboCooldown = DRIFT.turboCooldown;
+      this.turboJustEnded = true;
+    }
   }
 
   /** Cancela el derrape sin regalar turbo (pausa, cambio de pestaña, reinicio). */
@@ -1220,6 +1249,9 @@ export class Kart {
   clearTransientState() {
     this.cancelDrift();
     this.endTurbo();
+    this.turboJustActivated = false;
+    this.turboJustEnded = false;
+    this.turboCooldown = 0;
     this.clearItemState();
     this.stuckTime = 0;
     this.aiOvertakeTimer = 0;
@@ -1243,7 +1275,12 @@ export class Kart {
     let steer = clamp(controls.steer || 0, -1, 1);
 
     this.turboJustActivated = false;
+    this.turboJustEnded = false;
     this.justLanded = false;
+
+    if (this.turboCooldown > 0) {
+      this.turboCooldown = Math.max(0, this.turboCooldown - dt);
+    }
 
     // El turbo se congela con la pausa porque updateRace deja de llamar a step().
     if (this.turboActive) {
@@ -1323,6 +1360,9 @@ export class Kart {
       !this.driftActive &&
       !this.driftLock &&
       !this.airborne &&
+      !this.turboActive &&
+      this.turboCooldown <= 0 &&
+      this.stunTime <= 0 &&
       this.speed > DRIFT.minSpeed &&
       !this.onGrass &&
       Math.abs(steer) > 0.12
@@ -1336,9 +1376,15 @@ export class Kart {
         // Derrape abortado: no se convierte en turbo.
         this.finishDrift(false);
         this.driftLock = true;
-      } else if (!this.wallContact) {
+      } else if (
+        !this.wallContact &&
+        !this.turboActive &&
+        this.turboCooldown <= 0 &&
+        this.stunTime <= 0 &&
+        this.speed > DRIFT.minSpeed * 0.75
+      ) {
         // La carga exige girar de verdad y avanzar sobre el asfalto:
-        // mantener ESPACIO en recta o contra un muro no carga nada.
+        // mantener ESPACIO en recta, parado o contra un muro no carga nada.
         const speedFactor = clamp(
           (this.speed - DRIFT.minSpeed * 0.6) /
             Math.max(1, this.maxSpeed - DRIFT.minSpeed * 0.6),
@@ -1440,13 +1486,17 @@ export class Kart {
     this.position.z += Math.cos(moveHeading) * this.speed * dt;
 
     // Proyección sobre el trazado: límites, césped y progreso.
-    const projection = track.project(this.position);
+    const projection = track.project(this.position, this.route ?? null, this.trackS);
+    this.route = projection.routeId ?? null;
     this.lateral = projection.lateral;
     this.trackS = projection.s;
-    this.onGrass = !this.airborne && Math.abs(this.lateral) > track.halfWidth;
+    this.groundY = projection.height ?? 0;
+    const halfWidth = projection.halfWidth ?? track.halfWidth;
+    const wallOffset = projection.wallOffset ?? track.wallOffset;
+    this.onGrass = !this.airborne && Math.abs(this.lateral) > halfWidth;
     this.wallContact = false;
 
-    const limit = track.wallOffset - KART.wallLimitExtra;
+    const limit = wallOffset - KART.wallLimitExtra;
     if (Math.abs(this.lateral) > limit) {
       const side = Math.sign(this.lateral);
       const clampedLateral = side * limit;
@@ -1462,7 +1512,7 @@ export class Kart {
       const target = forwardDot >= 0 ? tangentHeading : tangentHeading + Math.PI;
       this.heading = lerpAngle(this.heading, target, 0.55);
       this.lateral = clampedLateral;
-      this.onGrass = !this.airborne && Math.abs(clampedLateral) > track.halfWidth;
+      this.onGrass = !this.airborne && Math.abs(clampedLateral) > halfWidth;
     }
 
     // Tiempo bloqueado: la IA lo usa para recuperarse sin teletransportes.
@@ -1476,44 +1526,77 @@ export class Kart {
     this.updateProgress(track, raceTime);
     this.updateVisual(dt, steer, previousSpeed);
 
-    this.group.position.set(this.position.x, 0.02 + this.height, this.position.z);
+    this.group.position.set(this.position.x, this.groundY + 0.02 + this.height, this.position.z);
     this.group.rotation.y = this.heading;
   }
 
   updateProgress(track, raceTime) {
     const length = track.length;
-    let delta = this.trackS - this.lastTrackS;
+    const previousS = this.lastTrackS;
+    let delta = this.trackS - previousS;
     if (delta > length / 2) delta -= length;
     if (delta < -length / 2) delta += length;
     this.lastTrackS = this.trackS;
+
+    const previousProgress = this.progress;
     this.progress += delta;
 
     if (this.finished) return;
+
+    // Checkpoints: la `s` global avanza de forma monótona por cualquiera de
+    // las rutas, así que una misma lista de controles valida los dos caminos.
+    const checkpoints = Array.isArray(track.checkpoints) ? track.checkpoints : null;
+    const wrap = (value) => {
+      if (typeof track.wrapDelta === 'function') return track.wrapDelta(value);
+      if (value > length / 2) return value - length;
+      if (value < -length / 2) return value + length;
+      return value;
+    };
+    if (checkpoints && checkpoints.length > 0 && delta > 0) {
+      for (let i = 0; i < checkpoints.length; i += 1) {
+        const ahead = wrap(checkpoints[i] - previousS);
+        if (ahead > 0 && ahead <= delta + 1e-6) {
+          this.checkpointMask |= 1 << i;
+        }
+      }
+      let count = 0;
+      for (let mask = this.checkpointMask; mask; mask >>= 1) count += mask & 1;
+      this.checkpointCount = count;
+    }
 
     // La primera vuelta empieza de verdad al cruzar la línea de salida.
     if (this.lapStartTime === null && this.progress >= 0) {
       this.lapStartTime = raceTime;
     }
 
-    const expectedLap = Math.floor(this.progress / length) + 1;
-    while (this.lap < expectedLap && !this.finished) {
-      if (this.lapStartTime !== null) {
-        const lapTime = Math.max(0, raceTime - this.lapStartTime);
-        this.lastLapTime = lapTime;
-        if (this.bestLapTime === null || lapTime < this.bestLapTime) {
-          this.bestLapTime = lapTime;
+    // Solo se concede una vuelta si se han cruzado todos los checkpoints.
+    const lapBefore = Math.floor(previousProgress / length);
+    const lapAfter = Math.floor(this.progress / length);
+    if (lapAfter > lapBefore && lapAfter >= 1) {
+      const required = checkpoints?.length ?? 0;
+      const valid = required === 0 || this.checkpointCount >= required;
+      if (valid) {
+        if (this.lapStartTime !== null) {
+          const lapTime = Math.max(0, raceTime - this.lapStartTime);
+          this.lastLapTime = lapTime;
+          if (this.bestLapTime === null || lapTime < this.bestLapTime) {
+            this.bestLapTime = lapTime;
+          }
+          this.lapStartTime = raceTime;
         }
-        this.lapStartTime = raceTime;
+        this.lap += 1;
+        if (this.lap > CONFIG.laps) {
+          this.lap = CONFIG.laps + 1;
+          this.finished = true;
+          this.finishTime = raceTime;
+          this.lapStartTime = null;
+        }
+      } else {
+        // Vuelta inválida: se pierde, pero el kart conserva su posición.
+        this.invalidLaps += 1;
       }
-
-      this.lap += 1;
-      if (this.lap > CONFIG.laps) {
-        this.lap = CONFIG.laps + 1;
-        this.finished = true;
-        this.finishTime = raceTime;
-        this.lapStartTime = null;
-        break;
-      }
+      this.checkpointMask = 0;
+      this.checkpointCount = 0;
     }
   }
 
@@ -1529,8 +1612,12 @@ export class Kart {
       if (wheel.front) wheel.steer.rotation.y = -this.steerVisual * 0.42;
     }
 
-    // Balanceo de la carrocería y cabeceo al acelerar/frenar.
-    const targetRoll = -this.steerVisual * 0.09 * speedRatio;
+    // Balanceo de la carrocería y cabeceo al acelerar/frenar. Durante el
+    // derrape la inclinación crece con el deslizamiento real.
+    const driftLean = this.driftActive
+      ? Math.min(1, Math.abs(this.driftSlip) / Math.max(0.001, DRIFT.slipMax))
+      : 0;
+    const targetRoll = -this.steerVisual * (0.09 + driftLean * 0.085) * speedRatio;
     const acceleration = dt > 0 ? clamp((this.speed - previousSpeed) / dt, -45, 30) : 0;
     const targetPitch = -acceleration * 0.0022;
     this.roll = damp(this.roll, targetRoll, 7, dt);

@@ -1,5 +1,40 @@
-// Pequeño motor de sonido con WebAudio: motor, pitidos de cuenta atrás y melodía final.
-// No usa archivos de audio externos.
+// Pequeño motor de sonido con WebAudio: motor, derrape, turbo, pitidos de
+// cuenta atrás y melodías finales. No usa archivos de audio externos.
+const SOUND_STORAGE_KEY = 'turbo-circuit-sound-v1';
+
+function resolveStorage(storage) {
+  if (storage) return storage;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) return window.localStorage;
+  } catch {
+    // Algunos navegadores bloquean localStorage en modo privado.
+  }
+  return null;
+}
+
+/** Preferencia de sonido persistida; por defecto activo. */
+export function loadSoundPreference(storage = null) {
+  const target = resolveStorage(storage);
+  if (!target) return true;
+  try {
+    return target.getItem(SOUND_STORAGE_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+/** Guarda el mute sin afectar al resto del progreso. */
+export function saveSoundPreference(enabled, storage = null) {
+  const target = resolveStorage(storage);
+  if (!target) return false;
+  try {
+    target.setItem(SOUND_STORAGE_KEY, enabled ? '1' : '0');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class AudioManager {
   constructor() {
     this.ctx = null;
@@ -9,7 +44,16 @@ export class AudioManager {
     this.oscA = null;
     this.oscB = null;
     this.engineActive = false;
-    this.enabled = true;
+    this.enabled = loadSoundPreference();
+
+    // Capas continuas reutilizadas (nunca se crean por frame).
+    this.noiseBuffer = null;
+    this.skidSource = null;
+    this.skidFilter = null;
+    this.skidGain = null;
+    this.turboOsc = null;
+    this.turboFilter = null;
+    this.turboGain = null;
   }
 
   ensure() {
@@ -97,6 +141,189 @@ export class AudioManager {
 
   resumeEngine() {
     this.engineActive = true;
+  }
+
+  /** Ruido marrón corto y reutilizable para derrape y golpes. */
+  getNoiseBuffer() {
+    const ctx = this.ctx;
+    if (!ctx) return null;
+    if (this.noiseBuffer) return this.noiseBuffer;
+    const length = Math.floor(ctx.sampleRate * 1.5);
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < length; i += 1) {
+      const white = Math.random() * 2 - 1;
+      last = (last + white * 0.03) / 1.03;
+      data[i] = last * 3.2;
+    }
+    this.noiseBuffer = buffer;
+    return buffer;
+  }
+
+  /** Crea una sola fuente en bucle para el derrape (se reutiliza siempre). */
+  ensureSkid() {
+    const ctx = this.ensure();
+    if (!ctx || this.skidGain) return;
+    const source = ctx.createBufferSource();
+    source.buffer = this.getNoiseBuffer();
+    source.loop = true;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 1500;
+    filter.Q.value = 0.8;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.master);
+    source.start();
+
+    this.skidSource = source;
+    this.skidFilter = filter;
+    this.skidGain = gain;
+  }
+
+  /** Intensidad 0..1 del derrape; 0 lo silencia suavemente. */
+  setSkid(intensity, onGrass = false) {
+    if (intensity > 0.02) this.ensureSkid();
+    if (!this.skidGain) return;
+    const now = this.ctx.currentTime;
+    const value = this.enabled ? Math.max(0, Math.min(1, intensity)) : 0;
+    const volume = value > 0.01 ? 0.018 + value * 0.055 : 0;
+    this.skidGain.gain.setTargetAtTime(volume, now, 0.06);
+    if (this.skidFilter) {
+      const frequency = onGrass ? 760 : 1650;
+      this.skidFilter.frequency.setTargetAtTime(frequency, now, 0.12);
+    }
+  }
+
+  stopSkid() {
+    if (!this.ctx || !this.skidGain) return;
+    this.skidGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.04);
+  }
+
+  /** Capa continua del turbo: sube de tono y volumen mientras dura. */
+  ensureTurboLayer() {
+    const ctx = this.ensure();
+    if (!ctx || this.turboGain) return;
+    const oscillator = ctx.createOscillator();
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.value = 76;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 520;
+    filter.Q.value = 0.7;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.master);
+    oscillator.start();
+
+    this.turboOsc = oscillator;
+    this.turboFilter = filter;
+    this.turboGain = gain;
+  }
+
+  /** ratio 0..1 = turbo restante; level 1 corto, 2 potente. */
+  setTurbo(ratio, level = 1) {
+    if (ratio > 0.01) this.ensureTurboLayer();
+    if (!this.turboGain) return;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    if (!this.enabled || ratio <= 0.01) {
+      this.turboGain.gain.setTargetAtTime(0, now, 0.06);
+      return;
+    }
+    const value = Math.max(0, Math.min(1, ratio));
+    const strong = level >= 2;
+    this.turboOsc.frequency.setTargetAtTime(
+      78 + value * 95 + (strong ? 26 : 0),
+      now,
+      0.08,
+    );
+    this.turboFilter.frequency.setTargetAtTime(
+      520 + value * 900 + (strong ? 180 : 0),
+      now,
+      0.1,
+    );
+    this.turboGain.gain.setTargetAtTime(0.02 + value * 0.045, now, 0.07);
+  }
+
+  stopTurbo() {
+    if (!this.ctx || !this.turboGain) return;
+    this.turboGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.05);
+  }
+
+  /** Golpe seco entre karts: grave y breve, sin tapar el motor. */
+  bump(strength = 1) {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.005;
+    const volume = 0.05 + Math.min(1, strength) * 0.05;
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(110, now);
+    oscillator.frequency.exponentialRampToValueAtTime(52, now + 0.16);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(volume, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+    oscillator.connect(gain);
+    gain.connect(this.master);
+    oscillator.start(now);
+    oscillator.stop(now + 0.23);
+    this.tone(180, now, 0.07, volume * 0.45, 'triangle');
+  }
+
+  /** Roce con el muro: más áspero que un golpe entre karts. */
+  wall(strength = 1) {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.005;
+    const volume = 0.04 + Math.min(1, strength) * 0.05;
+    this.tone(96, now, 0.13, volume, 'square');
+    this.tone(240, now + 0.01, 0.07, volume * 0.5, 'sawtooth');
+  }
+
+  /** Aviso breve y agudo al ganar una posición. */
+  overtake() {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.01;
+    this.tone(660, now, 0.07, 0.05, 'triangle');
+    this.tone(920, now + 0.06, 0.11, 0.055, 'triangle');
+  }
+
+  /** Melodía descendente para derrotas: misma familia que la victoria. */
+  defeatJingle() {
+    const ctx = this.ensure();
+    if (!ctx || !this.enabled) return;
+    const now = ctx.currentTime + 0.05;
+    const notes = [
+      [392, 0, 0.2],
+      [329.63, 0.18, 0.2],
+      [261.63, 0.36, 0.24],
+      [196, 0.58, 0.5],
+    ];
+    for (const [frequency, offset, duration] of notes) {
+      this.tone(frequency, now + offset, duration, 0.09, 'triangle');
+    }
+  }
+
+  /** Pausa/reinicio: nada continuo debe quedar sonando. */
+  stopAll() {
+    this.stopEngine();
+    this.stopSkid();
+    this.stopTurbo();
   }
 
   tone(frequency, startAt, duration, volume = 0.12, type = 'square') {
@@ -267,8 +494,13 @@ export class AudioManager {
 
   toggle() {
     this.enabled = !this.enabled;
-    if (!this.enabled && this.ctx && this.engineGain) {
-      this.engineGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
+    saveSoundPreference(this.enabled);
+    if (!this.enabled) {
+      if (this.ctx && this.engineGain) {
+        this.engineGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
+      }
+      this.stopSkid();
+      this.stopTurbo();
     }
     return this.enabled;
   }
@@ -278,9 +510,17 @@ export class AudioManager {
     try {
       if (this.oscA) this.oscA.stop();
       if (this.oscB) this.oscB.stop();
+      if (this.skidSource) this.skidSource.stop();
+      if (this.turboOsc) this.turboOsc.stop();
     } catch {
-      // Los osciladores ya podrían estar parados.
+      // Los nodos ya podrían estar parados.
     }
+    if (this.skidSource) this.skidSource.disconnect();
+    if (this.skidFilter) this.skidFilter.disconnect();
+    if (this.skidGain) this.skidGain.disconnect();
+    if (this.turboOsc) this.turboOsc.disconnect();
+    if (this.turboFilter) this.turboFilter.disconnect();
+    if (this.turboGain) this.turboGain.disconnect();
     if (this.ctx) {
       this.ctx.close().catch(() => {});
       this.ctx = null;
@@ -289,5 +529,12 @@ export class AudioManager {
     this.engineFilter = null;
     this.oscA = null;
     this.oscB = null;
+    this.noiseBuffer = null;
+    this.skidSource = null;
+    this.skidFilter = null;
+    this.skidGain = null;
+    this.turboOsc = null;
+    this.turboFilter = null;
+    this.turboGain = null;
   }
 }

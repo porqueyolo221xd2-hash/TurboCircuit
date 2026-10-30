@@ -7,9 +7,17 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "start": "node server/index.js",
+    "server": "node server/index.js",
+    "test": "node --test tests/economy.test.mjs tests/driving.test.mjs tests/feedback.test.mjs tests/tracks.test.mjs tests/online.test.mjs"
+  },
+  "engines": {
+    "node": ">=20.19.0"
   },
   "dependencies": {
+    "socket.io": "^4.8.4",
+    "socket.io-client": "^4.8.4",
     "three": "^0.186.1"
   },
   "devDependencies": {

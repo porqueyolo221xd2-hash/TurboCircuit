@@ -4,14 +4,17 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { ITEMS, ITEM_ORDER, randomItem } from './items.js';
 import { angleDiff, clamp } from './utils.js';
+import {
+  BOX_RESPAWN,
+  BOX_SPAWN_TIME,
+  BOX_PICKUP_RADIUS,
+  buildBoxPlan,
+} from './boxLayout.js';
+import { ITEM_COOLDOWN_MS, PICKUP_COOLDOWN_MS } from '../../shared/protocol.js';
 
-const ROW_GAP = 120;
-const ROW_COUNT = 6;
-const ROW_OFFSET = 70;
-const BOX_LANES = [-4.6, 0, 4.6];
-const BOX_RESPAWN = 5;
-const PICKUP_RADIUS = 2.1;
-const BOX_SPAWN_TIME = 0.38;
+const PICKUP_RADIUS = BOX_PICKUP_RADIUS;
+const PICKUP_COOLDOWN_SECONDS = PICKUP_COOLDOWN_MS / 1000;
+const ITEM_COOLDOWN_SECONDS = ITEM_COOLDOWN_MS / 1000;
 const SPECIAL_ITEMS = new Set(['MINA', 'FURIA']);
 
 /** Rectángulo redondeado reutilizable para las texturas de las cajas. */
@@ -228,18 +231,22 @@ export function segmentHitsKart(ax, az, bx, bz, kart, radius = 2) {
 }
 
 /** Comprueba que la línea de tiro no cruce los muros del circuito. */
-export function lineOfSightClear(track, from, to, margin = 0.8) {
+export function lineOfSightClear(track, from, to, margin = 0.8, routeId = null) {
   const dx = to.x - from.x;
   const dz = to.z - from.z;
   const distance = Math.hypot(dx, dz);
   const steps = Math.max(2, Math.ceil(distance / 4));
   for (let i = 1; i < steps; i += 1) {
     const t = i / steps;
-    const projection = track.project({
-      x: from.x + dx * t,
-      z: from.z + dz * t,
-    });
-    if (Math.abs(projection.lateral) > track.wallOffset - margin) return false;
+    const projection = track.project(
+      {
+        x: from.x + dx * t,
+        z: from.z + dz * t,
+      },
+      routeId,
+    );
+    const wallOffset = projection?.wallOffset ?? track.wallOffset;
+    if (Math.abs(projection.lateral) > wallOffset - margin) return false;
   }
   return true;
 }
@@ -271,7 +278,7 @@ export function chooseProjectileTarget(kart, karts, track, tuning = {}) {
 
     const lateral = Math.abs(dx * forwardZ - dz * forwardX);
     if (lateral > aimMargin) continue;
-    if (!lineOfSightClear(track, kart.position, other.position)) continue;
+    if (!lineOfSightClear(track, kart.position, other.position, 0.8, kart.route ?? null)) continue;
 
     if (distance < bestDistance) {
       bestDistance = distance;
@@ -300,6 +307,12 @@ export class ItemSystem {
     this.onProjectileHit = null;
     this.onMineTriggered = null;
     this.difficulty = null;
+    // Online: el servidor concede cajas y objetos. El cliente solo detecta
+    // contactos y reproduce los efectos confirmados.
+    this.onlineMode = false;
+    this.onBoxClaim = null;
+    this.localKart = null;
+    this.claimCooldowns = new Map();
 
     this.group = new THREE.Group();
     this.group.name = 'sistema-objetos';
@@ -492,38 +505,40 @@ export class ItemSystem {
   }
 
   buildBoxes() {
-    for (let row = 0; row < ROW_COUNT; row += 1) {
-      const s = this.track.startS + ROW_OFFSET + row * ROW_GAP;
-      for (const lane of BOX_LANES) {
-        const point = this.track.posAt(s, lane);
-        const group = new THREE.Group();
-        group.position.set(point.x, 0.95, point.z);
+    const plan = buildBoxPlan(this.track);
+    for (const entry of plan) {
+      const group = new THREE.Group();
+      const baseY = entry.y;
+      group.position.set(entry.x, baseY, entry.z);
 
-        const mesh = new THREE.Mesh(this.boxGeometry, this.boxMaterials.get('IMPULSO'));
-        mesh.castShadow = true;
-        const halo = new THREE.Mesh(this.boxHaloGeometry, this.boxHaloMaterials.get('IMPULSO'));
-        halo.rotation.x = Math.PI / 2;
-        const shell = new THREE.Mesh(this.boxShellGeometry, this.boxShellMaterials.get('IMPULSO'));
-        shell.visible = false;
-        group.add(mesh, halo, shell);
-        this.group.add(group);
+      const mesh = new THREE.Mesh(this.boxGeometry, this.boxMaterials.get('IMPULSO'));
+      mesh.castShadow = true;
+      const halo = new THREE.Mesh(this.boxHaloGeometry, this.boxHaloMaterials.get('IMPULSO'));
+      halo.rotation.x = Math.PI / 2;
+      const shell = new THREE.Mesh(this.boxShellGeometry, this.boxShellMaterials.get('IMPULSO'));
+      shell.visible = false;
+      group.add(mesh, halo, shell);
+      this.group.add(group);
 
-        const box = {
-          group,
-          mesh,
-          halo,
-          shell,
-          itemId: null,
-          special: false,
-          active: true,
-          respawn: 0,
-          phase: Math.random() * Math.PI * 2,
-          spawnTime: BOX_SPAWN_TIME,
-        };
-        this.applyBoxItem(box, randomItem());
-        box.mesh.scale.setScalar(1);
-        this.boxes.push(box);
-      }
+      const box = {
+        index: entry.index,
+        group,
+        mesh,
+        halo,
+        shell,
+        baseY,
+        s: entry.s,
+        routeId: entry.routeId,
+        itemId: null,
+        special: false,
+        active: true,
+        respawn: 0,
+        phase: Math.random() * Math.PI * 2,
+        spawnTime: BOX_SPAWN_TIME,
+      };
+      this.applyBoxItem(box, randomItem());
+      box.mesh.scale.setScalar(1);
+      this.boxes.push(box);
     }
   }
 
@@ -545,7 +560,7 @@ export class ItemSystem {
     box.respawn = 0;
     box.spawnTime = 0;
     box.group.visible = true;
-    box.group.position.y = 0.95;
+    box.group.position.y = box.baseY ?? 0.95;
     box.mesh.scale.setScalar(0.05);
     box.mesh.rotation.set(0, 0, 0);
     box.halo.scale.setScalar(0.6);
@@ -577,13 +592,99 @@ export class ItemSystem {
       box.respawn = 0;
       box.spawnTime = BOX_SPAWN_TIME * 0.6;
       box.group.visible = true;
-      box.group.position.y = 0.95;
+      box.group.position.y = box.baseY ?? 0.95;
       box.mesh.scale.setScalar(0.05);
       box.mesh.rotation.set(0, 0, 0);
       box.halo.scale.setScalar(0.6);
     }
+    this.claimCooldowns.clear();
     this.clearEffects();
     for (const kart of this.karts) kart.clearItemState();
+  }
+
+  /** Activa el modo online: sin respawn local ni concesión automática de cajas. */
+  setOnlineMode(enabled, localKart = null) {
+    this.onlineMode = Boolean(enabled);
+    this.localKart = localKart;
+    this.claimCooldowns.clear();
+    if (this.onlineMode) {
+      this.clearProjectiles();
+      this.clearMines();
+    }
+  }
+
+  /** Aplica la lista inicial de cajas confirmada por el servidor. */
+  applyServerBoxes(entries) {
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      if (!entry || !Number.isInteger(entry.index)) continue;
+      const box = this.boxes[entry.index];
+      if (!box) continue;
+      this.applyBoxItem(box, entry.itemId ?? 'IMPULSO');
+      box.active = entry.active !== false;
+      box.respawn = 0;
+      box.spawnTime = BOX_SPAWN_TIME;
+      box.group.visible = box.active;
+      box.group.position.y = box.baseY ?? 0.95;
+      box.mesh.scale.setScalar(1);
+      box.mesh.rotation.set(0, 0, 0);
+      box.halo.scale.setScalar(0.94);
+    }
+  }
+
+  /** Actualiza una sola caja (recogida o reaparición confirmada). */
+  setServerBox(index, active, itemId = null) {
+    const box = this.boxes[index];
+    if (!box) return;
+    if (itemId) this.applyBoxItem(box, itemId);
+    const wasActive = box.active;
+    box.active = Boolean(active);
+    box.respawn = 0;
+    box.group.visible = box.active;
+    if (box.active) {
+      box.spawnTime = 0;
+      box.mesh.scale.setScalar(1);
+      box.halo.scale.setScalar(0.94);
+      if (!wasActive) this.spawnBoxAppear(box);
+    }
+  }
+
+  /** El servidor confirma que este kart ha recogido una caja. */
+  awardServerItem(kart, itemId, boxIndex) {
+    if (!kart || !ITEMS[itemId]) return;
+    kart.item = itemId;
+    kart.pickupCooldown = PICKUP_COOLDOWN_SECONDS;
+    const box = this.boxes[boxIndex];
+    if (box) {
+      this.spawnBoxPickup(box);
+      box.active = false;
+      box.group.visible = false;
+    }
+    if (this.onPickup) this.onPickup(kart, itemId);
+  }
+
+  /** Reproduce un uso de objeto ya validado por el servidor. */
+  applyServerItemUse(kart, itemId, targetIds = [], karts = this.karts) {
+    const def = ITEMS[itemId];
+    if (!kart || !def) return;
+    if (kart.item === itemId) kart.item = null;
+    kart.itemUseCooldown = ITEM_COOLDOWN_SECONDS;
+
+    if (itemId === 'IMPULSO') {
+      kart.applyItemBoost(def.power, def.duration);
+    } else if (itemId === 'BARRERA') {
+      kart.applyBarrier(def.duration);
+    } else if (itemId === 'PULSO') {
+      this.spawnWave(kart);
+      const targets = new Set(targetIds);
+      for (const other of karts) {
+        if (other === kart || !targets.has(other.netId)) continue;
+        other.applySlow(def.slowFactor, def.slowDuration);
+        if (this.onSlow) this.onSlow(other);
+      }
+    }
+
+    if (this.onUse) this.onUse(kart, itemId);
   }
 
   /**
@@ -645,14 +746,17 @@ export class ItemSystem {
     this.updateProjectiles(dt, karts);
     this.updateBursts(dt);
     this.updateSparks(dt);
-    this.updateAI(dt, karts);
+    if (!this.onlineMode) this.updateAI(dt, karts);
   }
 
   updateBoxes(dt, karts) {
     for (const box of this.boxes) {
       if (!box.active) {
-        box.respawn -= dt;
-        if (box.respawn <= 0) this.activateBox(box);
+        // En online la reactivación la decide el servidor.
+        if (!this.onlineMode) {
+          box.respawn -= dt;
+          if (box.respawn <= 0) this.activateBox(box);
+        }
         continue;
       }
 
@@ -670,7 +774,7 @@ export class ItemSystem {
       box.mesh.rotation.y += dt * 1.55;
       box.mesh.rotation.x = Math.sin(this.time * 0.9 + box.phase) * 0.2;
       box.mesh.rotation.z = Math.sin(this.time * 0.7 + box.phase * 1.3) * 0.12;
-      box.group.position.y = 0.95 + Math.sin(this.time * 2 + box.phase) * 0.12;
+      box.group.position.y = (box.baseY ?? 0.95) + Math.sin(this.time * 2 + box.phase) * 0.12;
 
       const pulse = 0.94 + Math.sin(this.time * 3.2 + box.phase) * 0.06;
       box.halo.scale.setScalar(pulse);
@@ -680,11 +784,31 @@ export class ItemSystem {
         box.shell.scale.setScalar(1 + Math.sin(this.time * 4 + box.phase) * 0.035);
       }
 
-      for (const kart of karts) {
-        if (kart.finished || kart.item || kart.pickupCooldown > 0) continue;
+      if (this.onlineMode) {
+        const kart = this.localKart ?? karts[0];
+        if (!kart || kart.finished || kart.item || kart.pickupCooldown > 0) continue;
+        if (box.routeId && box.routeId !== kart.route) continue;
         const dx = kart.position.x - box.group.position.x;
         const dz = kart.position.z - box.group.position.z;
         if (dx * dx + dz * dz > PICKUP_RADIUS * PICKUP_RADIUS) continue;
+        if ((kart.height ?? 0) > 1.8) continue;
+
+        // No se concede nada en local: se pide al servidor y se evita repetir
+        // la petición mientras llega la respuesta.
+        const last = this.claimCooldowns.get(box.index) ?? -Infinity;
+        if (this.time - last < 0.35) continue;
+        this.claimCooldowns.set(box.index, this.time);
+        if (this.onBoxClaim) this.onBoxClaim(box.index);
+        continue;
+      }
+
+      for (const kart of karts) {
+        if (kart.finished || kart.item || kart.pickupCooldown > 0) continue;
+        if (box.routeId && box.routeId !== kart.route) continue;
+        const dx = kart.position.x - box.group.position.x;
+        const dz = kart.position.z - box.group.position.z;
+        if (dx * dx + dz * dz > PICKUP_RADIUS * PICKUP_RADIUS) continue;
+        if ((kart.height ?? 0) > 1.8) continue;
 
         // El objeto estaba decidido al aparecer: el icono siempre coincide.
         const itemId = box.itemId ?? randomItem();
@@ -734,18 +858,20 @@ export class ItemSystem {
     const heading = kart.heading + angleOffset;
     const forwardX = Math.sin(heading);
     const forwardZ = Math.cos(heading);
+    const routeId = kart.route ?? null;
     let x = kart.position.x + forwardX * PROJECTILE_SPAWN_AHEAD;
     let z = kart.position.z + forwardZ * PROJECTILE_SPAWN_AHEAD;
-    let spawnProjection = this.track.project({ x, z });
+    let spawnProjection = this.track.project({ x, z }, routeId, kart.trackS);
+    const spawnWall = () => spawnProjection.wallOffset ?? this.track.wallOffset;
 
     // Si el kart está pegado al muro, el morro puede quedar fuera: se prueba
     // un punto algo más cercano antes de descartar el disparo.
-    if (Math.abs(spawnProjection.lateral) > this.track.wallOffset - PROJECTILE_WALL_MARGIN) {
+    if (Math.abs(spawnProjection.lateral) > spawnWall() - PROJECTILE_WALL_MARGIN) {
       for (const ahead of [1.4, 0.7]) {
         const testX = kart.position.x + forwardX * ahead;
         const testZ = kart.position.z + forwardZ * ahead;
-        const testProjection = this.track.project({ x: testX, z: testZ });
-        if (Math.abs(testProjection.lateral) <= this.track.wallOffset - PROJECTILE_WALL_MARGIN) {
+        const testProjection = this.track.project({ x: testX, z: testZ }, routeId, kart.trackS);
+        if (Math.abs(testProjection.lateral) <= (testProjection.wallOffset ?? this.track.wallOffset) - PROJECTILE_WALL_MARGIN) {
           x = testX;
           z = testZ;
           spawnProjection = testProjection;
@@ -753,7 +879,7 @@ export class ItemSystem {
         }
       }
     }
-    if (Math.abs(spawnProjection.lateral) > this.track.wallOffset - PROJECTILE_WALL_MARGIN) {
+    if (Math.abs(spawnProjection.lateral) > spawnWall() - PROJECTILE_WALL_MARGIN) {
       return null;
     }
 
@@ -795,7 +921,8 @@ export class ItemSystem {
       group.add(core, shell, ring, tail);
     }
 
-    group.position.set(x, PROJECTILE_HEIGHT, z);
+    const baseY = spawnProjection.height ?? kart.groundY ?? 0;
+    group.position.set(x, baseY + PROJECTILE_HEIGHT, z);
     group.rotation.y = heading;
     this.group.add(group);
 
@@ -811,6 +938,8 @@ export class ItemSystem {
       def,
       x,
       z,
+      routeId,
+      baseY,
       directionX: forwardX,
       directionZ: forwardZ,
       traveled: 0,
@@ -841,9 +970,10 @@ export class ItemSystem {
       projectile.traveled += step;
       projectile.x = nextX;
       projectile.z = nextZ;
+      const projectileY = (projectile.baseY ?? 0) + PROJECTILE_HEIGHT;
       projectile.mesh.position.set(
         nextX,
-        PROJECTILE_HEIGHT + Math.sin(projectile.life * 17 + projectile.seed) * 0.07,
+        projectileY + Math.sin(projectile.life * 17 + projectile.seed) * 0.07,
         nextZ,
       );
       // La estela debe apuntar siempre hacia atrás: se gira el núcleo, no el grupo.
@@ -888,7 +1018,7 @@ export class ItemSystem {
         });
         this.spawnSparks(
           nextX,
-          PROJECTILE_HEIGHT,
+          (projectile.baseY ?? 0) + PROJECTILE_HEIGHT,
           nextZ,
           blocked ? 0x9dff8f : furia ? 0xe2b0ff : 0xffb6cc,
           furia ? 14 : 9,
@@ -904,7 +1034,7 @@ export class ItemSystem {
 
       const midX = (previousX + nextX) / 2;
       const midZ = (previousZ + nextZ) / 2;
-      if (this.isOutsideTrack(nextX, nextZ) || this.isOutsideTrack(midX, midZ)) {
+      if (this.isOutsideTrack(nextX, nextZ, projectile.routeId) || this.isOutsideTrack(midX, midZ, projectile.routeId)) {
         this.spawnBurst(nextX, nextZ, false, {
           color: projectile.kind === 'FURIA' ? 0xc66bff : null,
           scale: 0.8,
@@ -920,9 +1050,11 @@ export class ItemSystem {
     }
   }
 
-  isOutsideTrack(x, z) {
-    const projection = this.track.project({ x, z });
-    return Math.abs(projection.lateral) > this.track.wallOffset - PROJECTILE_WALL_MARGIN;
+  isOutsideTrack(x, z, routeId = null) {
+    const projection = this.track.project({ x, z }, routeId);
+    if (!projection) return true;
+    const wallOffset = projection.wallOffset ?? this.track.wallOffset;
+    return Math.abs(projection.lateral) > wallOffset - PROJECTILE_WALL_MARGIN;
   }
 
   removeProjectileAt(index) {
@@ -1052,13 +1184,24 @@ export class ItemSystem {
   spawnMine(kart) {
     if (!kart) return null;
     const def = ITEMS.MINA;
-    const limit = this.track.wallOffset - MINE_WALL_MARGIN;
+    const routeId = kart.route ?? null;
+    const route = routeId ? this.track.routesById.get(routeId) : null;
+    const wallOffset = route ? route.wallOffset : this.track.wallOffset;
+    const limit = wallOffset - MINE_WALL_MARGIN;
     const lateral = clamp(kart.lateral, -limit, limit);
-    const point = this.track.posAt(kart.trackS - def.placeBehind, lateral);
-    const projection = this.track.project(point);
-    const clampedLateral = clamp(projection.lateral, -limit, limit);
+    let behindS = kart.trackS - def.placeBehind;
+    if (route) {
+      const local = this.track.localSForRoute(route, kart.trackS);
+      behindS = this.track.globalSForRoute(route, Math.max(1.5, local - def.placeBehind));
+    }
+    const point = this.track.posAt(behindS, lateral, routeId);
+    const projection = this.track.project(point, routeId, kart.trackS);
+    const projectedWall = projection.wallOffset ?? wallOffset;
+    const projectedLimit = projectedWall - MINE_WALL_MARGIN;
+    const clampedLateral = clamp(projection.lateral, -projectedLimit, projectedLimit);
     const x = projection.centerX + projection.sx * clampedLateral;
     const z = projection.centerZ + projection.sz * clampedLateral;
+    const baseY = projection.height ?? 0;
 
     if (this.mines.length >= Math.min(def.limit ?? MINE_LIMIT, MINE_LIMIT)) {
       this.removeMineAt(0);
@@ -1066,7 +1209,7 @@ export class ItemSystem {
 
     const group = new THREE.Group();
     group.name = 'mina';
-    group.position.set(x, 0, z);
+    group.position.set(x, baseY, z);
 
     const base = new THREE.Mesh(this.mineBaseGeometry, this.mineBaseMaterial);
     base.position.y = 0.1;
@@ -1120,6 +1263,8 @@ export class ItemSystem {
       owner: kart,
       x,
       z,
+      baseY,
+      routeId,
       def,
       life: 0,
       phase: Math.random() * Math.PI * 2,
@@ -1166,6 +1311,7 @@ export class ItemSystem {
         if (kart.finished) continue;
         if (kart === mine.owner && mine.life < def.armTime + 0.6) continue;
         if ((kart.height ?? 0) > 1.3) continue;
+        if (Math.abs((kart.groundY ?? 0) - (mine.baseY ?? 0)) > 2.2) continue;
         const dx = kart.position.x - mine.x;
         const dz = kart.position.z - mine.z;
         if (dx * dx + dz * dz <= def.triggerRadius * def.triggerRadius) {
@@ -1179,26 +1325,28 @@ export class ItemSystem {
   explodeMine(index, triggeredBy) {
     const mine = this.mines[index];
     if (!mine) return;
-    const { def, x, z, owner } = mine;
+    const { def, x, z, owner, baseY = 0 } = mine;
     this.removeMineAt(index);
 
     this.spawnBurst(x, z, false, {
       color: 0xffb03a,
       scale: 1.9,
       duration: 0.5,
-      height: 0.55,
+      height: baseY + 0.55,
     });
     this.spawnWaveAt(x, z, {
       color: 0xffb03a,
       radius: def.blastRadius,
       duration: 0.55,
       opacity: 0.8,
+      y: baseY + 0.12,
     });
-    this.spawnSparks(x, 0.6, z, 0xffcf6a, 22, 9, 0.55);
+    this.spawnSparks(x, baseY + 0.6, z, 0xffcf6a, 22, 9, 0.55);
 
     const affected = [];
     for (const kart of this.karts) {
       if (kart.finished) continue;
+      if (Math.abs((kart.groundY ?? 0) - baseY) > 2.4) continue;
       const dx = kart.position.x - x;
       const dz = kart.position.z - z;
       const distance = Math.hypot(dx, dz);
@@ -1345,6 +1493,8 @@ export class ItemSystem {
    * el kart ya terminó o está en recarga.
    */
   useItem(kart) {
+    // En online la petición viaja al servidor; no se aplica nada por cuenta propia.
+    if (this.onlineMode) return null;
     if (!kart.item || kart.finished || kart.itemUseCooldown > 0) return null;
     const id = kart.item;
     const def = ITEMS[id];

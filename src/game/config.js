@@ -32,6 +32,9 @@ export const CONFIG = {
     shortPower: 0.2,
     strongDuration: 1.8,
     strongPower: 0.34,
+    // Tras gastar un turbo hay una pausa breve antes de poder cargar otro:
+    // evita encadenar impulsos infinitos sin tocar la fuerza ni la duración.
+    turboCooldown: 0.5,
   },
   // Situación en la parrilla (distancia detrás de la línea de meta).
   grid: [
@@ -46,6 +49,8 @@ export const CONFIG = {
     lookAhead: 6,
     lookHeight: 1.2,
     fov: 62,
+    turboFov: 6,
+    shakeDecay: 8,
   },
   // Aturdimiento: nunca congela el kart, recorta el control y se recupera solo.
   stun: {

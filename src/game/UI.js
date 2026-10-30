@@ -1,5 +1,6 @@
 // Interfaz HTML: pantallas, HUD, resultados y minimapa dibujado en canvas.
 import { clamp, formatTime } from './utils.js';
+import { MAPS, MAP_ORDER } from './maps.js';
 import {
   coinsFor,
   kartPrice,
@@ -45,6 +46,11 @@ export class UI {
       soundButton: byId('btn-sound'),
       shopButton: byId('btn-shop'),
       menuCoins: byId('menu-coins'),
+      menuNotice: byId('menu-notice'),
+      resultsReward: byId('results-reward'),
+      resultsCoins: byId('results-coins'),
+      resultsBalance: byId('results-balance'),
+      resultsDifficulty: byId('results-difficulty'),
       startButton: byId('btn-start'),
       resumeButton: byId('btn-resume'),
       restartButton: byId('btn-restart'),
@@ -62,6 +68,8 @@ export class UI {
       stunFill: byId('stun-fill'),
       lapToast: byId('lap-toast'),
       lapToastValue: byId('lap-toast-value'),
+      overtakeToast: byId('overtake-toast'),
+      overtakePosition: byId('overtake-position'),
       mapButtons: Array.from(document.querySelectorAll('[data-map]')),
       mapCurrent: byId('map-current'),
       mapDesc: byId('map-desc'),
@@ -79,6 +87,32 @@ export class UI {
       statBars: Array.from(document.querySelectorAll('[data-stat]')),
       touchItem: byId('touch-item'),
       touchItemIcon: byId('touch-item-icon'),
+      onlineButton: byId('btn-online'),
+      online: byId('screen-online'),
+      onlineBack: byId('btn-online-back'),
+      onlineConnection: byId('online-connection'),
+      onlineHome: byId('online-home'),
+      onlineLobby: byId('online-lobby'),
+      onlineName: byId('online-name'),
+      onlineCode: byId('online-code'),
+      onlineCreate: byId('btn-online-create'),
+      onlineJoin: byId('btn-online-join'),
+      onlineError: byId('online-error'),
+      onlineServer: byId('online-server'),
+      onlineRoomCode: byId('online-room-code'),
+      onlineCopy: byId('btn-online-copy'),
+      onlineStatus: byId('online-status'),
+      onlineCount: byId('online-count'),
+      onlinePlayers: byId('online-players'),
+      onlineMap: byId('online-map'),
+      onlineMapHint: byId('online-map-hint'),
+      onlineStart: byId('btn-online-start'),
+      onlineLeave: byId('btn-online-leave'),
+      onlineLobbyNote: byId('online-lobby-note'),
+      hudOnlineRace: byId('hud-online-race'),
+      onlineRaceCode: byId('online-race-code'),
+      onlineRaceList: byId('online-race-list'),
+      onlineToast: byId('online-toast'),
     };
 
     this.isTouch = document.documentElement.classList.contains('is-touch');
@@ -86,8 +120,12 @@ export class UI {
     this.impactTimer = null;
     this.launchTimer = null;
     this.lapToastTimer = null;
+    this.overtakeTimer = null;
+    this.noticeTimer = null;
+    this.onlineToastTimer = null;
     this.mapSize = 168;
     this.mapPath = null;
+    this.mapRoutePaths = [];
     this.mapTransform = null;
     this.lastPosition = null;
     this.lastLap = null;
@@ -103,6 +141,32 @@ export class UI {
     if (this.textCache.get(element) === value) return;
     this.textCache.set(element, value);
     element.textContent = value;
+  }
+
+  /**
+   * Aviso breve bajo el menú (por ejemplo, si el navegador no deja guardar la
+   * selección). Vacío = oculto.
+   */
+  notice(message, tone = 'info') {
+    const element = this.el.menuNotice;
+    if (!element) return;
+    if (this.noticeTimer) {
+      window.clearTimeout(this.noticeTimer);
+      this.noticeTimer = null;
+    }
+    if (!message) {
+      element.textContent = '';
+      element.classList.add('hidden');
+      element.classList.remove('is-error', 'is-ok');
+      return;
+    }
+    element.textContent = message;
+    element.classList.remove('hidden');
+    element.classList.toggle('is-error', tone === 'error');
+    element.classList.toggle('is-ok', tone === 'ok');
+    if (tone !== 'error') {
+      this.noticeTimer = window.setTimeout(() => this.notice(''), 5000);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -251,10 +315,14 @@ export class UI {
     let badge = button.querySelector('.lock-badge');
     if (owned) {
       if (badge) badge.remove();
+      button.removeAttribute('data-locked');
+      button.title = '';
       return;
     }
 
     const price = kind === 'map' ? mapPrice(id) : kartPrice(id);
+    const coins = Math.max(0, Math.floor(Number(progress?.coins) || 0));
+    const missing = Math.max(0, price - coins);
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'lock-badge';
@@ -265,12 +333,18 @@ export class UI {
     const coin = document.createElement('i');
     coin.className = 'coin-icon';
     badge.append(coin, document.createTextNode(String(price)));
-    button.title = `Bloqueado · ${price} monedas. Pulsa para abrir la tienda.`;
+    badge.title = missing > 0 ? `Te faltan ${missing} monedas` : 'Ya puedes comprarlo';
+    button.dataset.locked = 'true';
+    button.title =
+      missing > 0
+        ? `Bloqueado · ${price} monedas · te faltan ${missing}. Pulsa para abrir la tienda.`
+        : `Bloqueado · ${price} monedas. Pulsa para abrir la tienda.`;
   }
 
   /** Al cambiar de circuito, el minimapa debe recalcular su trazado. */
   resetMinimap() {
     this.mapPath = null;
+    this.mapRoutePaths = [];
     this.mapTransform = null;
     if (this.mapCtx) this.mapCtx.clearRect(0, 0, this.mapSize, this.mapSize);
   }
@@ -350,6 +424,21 @@ export class UI {
     }, 1500);
   }
 
+  /** Aviso breve al confirmar un adelantamiento real. */
+  showOvertake(position) {
+    const toast = this.el.overtakeToast;
+    if (!toast) return;
+    this.setText(this.el.overtakePosition, `${position}º`);
+    toast.classList.remove('show');
+    void toast.offsetWidth;
+    toast.classList.add('show');
+    if (this.overtakeTimer) window.clearTimeout(this.overtakeTimer);
+    this.overtakeTimer = window.setTimeout(() => {
+      toast.classList.remove('show');
+      this.overtakeTimer = null;
+    }, 1300);
+  }
+
   showCountdown(value) {
     this.el.countdown.classList.remove('hidden');
     const isGo = value <= 0;
@@ -369,19 +458,27 @@ export class UI {
     this.el.countdown.classList.remove('go');
   }
 
-  showResults({ position, total, rows, note }) {
+  showResults({ position, total, rows, note, online = false }) {
     const titles = {
       1: '¡Victoria!',
       2: '¡Buen podio!',
       3: '¡Podio!',
       4: '¡A remontar!',
     };
-    this.el.resultsTitle.textContent = titles[position] || '¡Carrera terminada!';
+    this.el.resultsTitle.textContent = online
+      ? position === 1
+        ? '¡Victoria online!'
+        : 'Carrera online terminada'
+      : titles[position] || '¡Carrera terminada!';
     this.el.resultsPosition.textContent = `${position}º`;
     this.el.resultsPosition.title = `${position}º de ${total}`;
     const stars = Math.max(0, 4 - position);
     this.el.resultsStars.textContent = `${'★'.repeat(stars)}${'☆'.repeat(3 - stars)}`;
     this.el.resultsNote.textContent = note;
+    if (this.el.resultsReward) this.el.resultsReward.classList.toggle('hidden', online);
+    if (this.el.againButton) {
+      this.setText(this.el.againButton, online ? 'Pedir revancha' : 'Volver a jugar');
+    }
 
     this.el.resultsBody.replaceChildren();
     for (const row of rows) {
@@ -417,6 +514,234 @@ export class UI {
 
   hideResults() {
     this.el.results.classList.add('hidden');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Multijugador online
+  // ---------------------------------------------------------------------------
+
+  showOnline() {
+    this.el.menu.classList.add('hidden');
+    this.el.online.classList.remove('hidden');
+    this.el.results.classList.add('hidden');
+    this.showOnlineHome();
+  }
+
+  hideOnline() {
+    this.el.online.classList.add('hidden');
+    this.hideOnlineRace();
+    this.showOnlineError('');
+  }
+
+  showOnlineHome() {
+    this.el.onlineHome.classList.remove('hidden');
+    this.el.onlineLobby.classList.add('hidden');
+    this.el.online.classList.remove('hidden');
+    this.el.menu.classList.add('hidden');
+  }
+
+  showOnlineLobby() {
+    this.el.onlineHome.classList.add('hidden');
+    this.el.onlineLobby.classList.remove('hidden');
+    this.el.online.classList.remove('hidden');
+    this.el.menu.classList.add('hidden');
+  }
+
+  setOnlineServer(url) {
+    const label = String(url || '—').replace(/^https?:\/\//, '');
+    this.setText(this.el.onlineServer, label);
+  }
+
+  setOnlineName(name) {
+    if (this.el.onlineName && name) this.el.onlineName.value = name;
+  }
+
+  getOnlineName() {
+    return String(this.el.onlineName?.value ?? '').trim();
+  }
+
+  getOnlineCode() {
+    return String(this.el.onlineCode?.value ?? '');
+  }
+
+  setOnlineCode(code) {
+    if (this.el.onlineCode) this.el.onlineCode.value = code ?? '';
+  }
+
+  /** Estado de la conexión con el servidor de salas. */
+  setOnlineConnection(state) {
+    const chip = this.el.onlineConnection;
+    if (!chip) return;
+    const labels = {
+      connected: 'Conectado',
+      connecting: 'Conectando…',
+      reconnecting: 'Reconectando…',
+      offline: 'Sin conexión',
+    };
+    chip.textContent = labels[state] ?? 'Desconectado';
+    chip.classList.remove('is-offline', 'is-online', 'is-waiting');
+    chip.classList.add(
+      state === 'connected' ? 'is-online' : state === 'offline' ? 'is-offline' : 'is-waiting',
+    );
+  }
+
+  showOnlineError(message) {
+    const element = this.el.onlineError;
+    if (!element) return;
+    if (!message) {
+      element.textContent = '';
+      element.classList.add('hidden');
+      return;
+    }
+    element.textContent = message;
+    element.classList.remove('hidden');
+  }
+
+  /** Rellena el selector de circuitos una sola vez con los seis mapas. */
+  fillOnlineMaps() {
+    const select = this.el.onlineMap;
+    if (!select || select.options.length > 0) return;
+    for (const id of MAP_ORDER) {
+      const option = document.createElement('option');
+      option.value = id;
+      option.textContent = MAPS[id]?.name ?? id;
+      select.append(option);
+    }
+  }
+
+  /**
+   * Pinta la sala. `selfId` es el identificador de sesión, nunca el nombre:
+   * dos jugadores pueden llamarse igual en salas distintas sin ambigüedad.
+   */
+  setOnlineRoom(room, selfId) {
+    if (!room) {
+      this.showOnlineHome();
+      return;
+    }
+    this.fillOnlineMaps();
+    this.showOnlineLobby();
+    this.setText(this.el.onlineRoomCode, room.code);
+    const isHost = room.hostId === selfId;
+    const total = room.players.length;
+    this.setText(this.el.onlineCount, `${total}/${room.maxPlayers}`);
+
+    const list = this.el.onlinePlayers;
+    if (list) {
+      list.replaceChildren();
+      for (const player of room.players) {
+        const li = document.createElement('li');
+        li.className = 'online-player';
+        if (player.id === selfId) li.classList.add('is-self');
+        if (!player.connected) li.classList.add('is-offline');
+
+        const dot = document.createElement('span');
+        dot.className = 'online-player-dot';
+        const name = document.createElement('span');
+        name.className = 'online-player-name';
+        name.textContent = player.name;
+        li.append(dot, name);
+
+        if (player.isHost) {
+          const badge = document.createElement('span');
+          badge.className = 'online-badge is-host';
+          badge.textContent = 'ANFITRIÓN';
+          li.append(badge);
+        }
+        if (player.id === selfId) {
+          const badge = document.createElement('span');
+          badge.className = 'online-badge';
+          badge.textContent = 'TÚ';
+          li.append(badge);
+        }
+        if (!player.connected) {
+          const badge = document.createElement('span');
+          badge.className = 'online-badge is-off';
+          badge.textContent = 'SIN CONEXIÓN';
+          li.append(badge);
+        }
+        list.append(li);
+      }
+    }
+
+    const select = this.el.onlineMap;
+    if (select) {
+      if (MAPS[room.mapId]) select.value = room.mapId;
+      select.disabled = !isHost || room.status !== 'lobby';
+    }
+    this.setText(
+      this.el.onlineMapHint,
+      isHost ? 'Elige el circuito y pulsa iniciar.' : 'Solo el anfitrión puede cambiar el circuito.',
+    );
+
+    if (this.el.onlineStart) {
+      const canStart = isHost && room.status === 'lobby';
+      this.el.onlineStart.disabled = !canStart;
+      this.setText(this.el.onlineStart, isHost ? 'Iniciar carrera' : 'Esperando al anfitrión…');
+    }
+
+    this.setText(
+      this.el.onlineStatus,
+      room.status === 'lobby' ? (isHost ? 'Eres el anfitrión' : 'En espera') : 'En carrera',
+    );
+    this.setText(
+      this.el.onlineLobbyNote,
+      total < 2
+        ? 'Comparte el código: puede empezar solo, pero la gracia es correr contra alguien.'
+        : 'Comparte el código. La carrera empezará cuando el anfitrión pulse iniciar.',
+    );
+  }
+
+  /** Clasificación compartida durante la carrera (panel compacto del HUD). */
+  updateOnlineRace({ code, standings = [], selfId } = {}) {
+    const panel = this.el.hudOnlineRace;
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    this.setText(this.el.onlineRaceCode, code ?? '-----');
+    const list = this.el.onlineRaceList;
+    if (!list) return;
+    list.replaceChildren();
+    for (const row of standings) {
+      const li = document.createElement('li');
+      li.className = 'online-race-row';
+      if (row.id === selfId) li.classList.add('is-self');
+      if (!row.connected) li.classList.add('is-offline');
+      if (row.finished) li.classList.add('is-finished');
+
+      const pos = document.createElement('span');
+      pos.className = 'online-race-pos';
+      pos.textContent = `${row.position}º`;
+      const name = document.createElement('span');
+      name.className = 'online-race-name';
+      name.textContent = row.name;
+      const info = document.createElement('span');
+      info.className = 'online-race-info';
+      if (row.finished && Number.isFinite(row.finishTime)) info.textContent = formatTime(row.finishTime);
+      else info.textContent = `V${Math.min(row.lap ?? 1, 9)}`;
+      li.append(pos, name, info);
+      list.append(li);
+    }
+  }
+
+  hideOnlineRace() {
+    if (this.el.hudOnlineRace) this.el.hudOnlineRace.classList.add('hidden');
+  }
+
+  /** Aviso breve de sala (entradas, salidas, espera, errores). */
+  showOnlineToast(message, tone = 'info') {
+    const toast = this.el.onlineToast;
+    if (!toast || !message) return;
+    toast.textContent = message;
+    toast.classList.remove('hidden', 'is-error', 'is-ok');
+    toast.classList.toggle('is-error', tone === 'error');
+    toast.classList.toggle('is-ok', tone === 'ok');
+    toast.classList.remove('show');
+    void toast.offsetWidth;
+    toast.classList.add('show');
+    if (this.onlineToastTimer) window.clearTimeout(this.onlineToastTimer);
+    this.onlineToastTimer = window.setTimeout(() => {
+      toast.classList.remove('show');
+      this.onlineToastTimer = null;
+    }, 2600);
   }
 
   // ---------------------------------------------------------------------------
@@ -461,6 +786,7 @@ export class UI {
     drifting = false,
     turboActive = false,
     turboLevel = 0,
+    turboCooldown = 0,
     boosting = turboActive,
   }) {
     const meter = this.el.turboMeter;
@@ -472,12 +798,14 @@ export class UI {
     meter.classList.toggle('ready', !turboActive && charge >= level1);
     meter.classList.toggle('max', !turboActive && charge >= level2);
     meter.classList.toggle('active', Boolean(turboActive));
+    meter.classList.toggle('cooldown', !turboActive && turboCooldown > 0.01);
     this.setSpeedFx(boosting);
 
     let state = this.isTouch ? 'DRIFT' : 'ESPACIO';
     if (turboActive) state = turboLevel >= 2 ? '¡POTENTE!' : '¡CORTO!';
     else if (charge >= level2) state = '¡MÁXIMO!';
     else if (charge >= level1) state = 'LISTO';
+    else if (turboCooldown > 0.01) state = 'RECARGANDO';
     else if (drifting) state = 'CARGANDO';
     this.setText(this.el.turboState, state);
   }
@@ -557,10 +885,17 @@ export class UI {
     if (this.mapPath) return;
     const size = this.mapSize;
     const padding = 15;
-    const { minX, maxX, minZ, maxZ } = track.bounds;
+    let { minX, maxX, minZ, maxZ } = track.bounds;
+    for (const route of track.routes ?? []) {
+      for (const sample of route.samples) {
+        minX = Math.min(minX, sample.point.x);
+        maxX = Math.max(maxX, sample.point.x);
+        minZ = Math.min(minZ, sample.point.z);
+        maxZ = Math.max(maxZ, sample.point.z);
+      }
+    }
     const trackWidth = maxX - minX;
-    const trackHeight = maxZ - minZ;
-    const scale = Math.min((size - padding * 2) / trackWidth, (size - padding * 2) / trackHeight);
+    const trackHeight = maxZ - minZ;    const scale = Math.min((size - padding * 2) / trackWidth, (size - padding * 2) / trackHeight);
     const offsetX = (size - trackWidth * scale) / 2;
     const offsetY = (size - trackHeight * scale) / 2;
     this.mapTransform = { minX, minZ, scale, offsetX, offsetY };
@@ -576,6 +911,21 @@ export class UI {
     }
     path.closePath();
     this.mapPath = path;
+
+    // Rutas alternativas: se dibujan como ramas reales del trazado.
+    this.mapRoutePaths = [];
+    for (const route of track.routes ?? []) {
+      const branch = new Path2D();
+      const branchStep = 3;
+      for (let i = 0; i < route.samples.length; i += branchStep) {
+        const { x, z } = route.samples[i].point;
+        const px = offsetX + (x - minX) * scale;
+        const py = offsetY + (z - minZ) * scale;
+        if (i === 0) branch.moveTo(px, py);
+        else branch.lineTo(px, py);
+      }
+      this.mapRoutePaths.push(branch);
+    }
   }
 
   updateMinimap(track, karts, player) {
@@ -598,6 +948,16 @@ export class UI {
     ctx.strokeStyle = '#cfe1f5';
     ctx.lineWidth = 8;
     ctx.stroke(this.mapPath);
+
+    // Ramas: mismo tratamiento para que se lean como parte del circuito.
+    for (const branch of this.mapRoutePaths) {
+      ctx.strokeStyle = 'rgba(2, 8, 20, 0.7)';
+      ctx.lineWidth = 12;
+      ctx.stroke(branch);
+      ctx.strokeStyle = '#cfe1f5';
+      ctx.lineWidth = 7;
+      ctx.stroke(branch);
+    }
 
     // Línea de salida/meta.
     const frame = track.frameAt(track.startS);

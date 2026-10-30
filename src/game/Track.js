@@ -24,10 +24,16 @@ import {
 } from './textures.js';
 
 const SEGMENTS = 720;
+const ROUTE_SEGMENTS = 240;
 
 export class Track {
-  constructor(map = null) {
+  /**
+   * `options.headless` construye solo los datos de simulación (sin mallas ni
+   * texturas). Así los tests pueden generar los seis circuitos en Node.
+   */
+  constructor(map = null, options = {}) {
     this.map = map && map.controlPoints ? map : getMap('coast');
+    this.headless = options.headless === true;
     this.group = new THREE.Group();
     this.group.name = `circuito-${this.map.id}`;
     this.halfWidth = this.map.roadWidth / 2;
@@ -35,6 +41,9 @@ export class Track {
     this.wallOffset = this.halfWidth + this.shoulderWidth;
     this.curbWidth = 1.35;
     this.samples = [];
+    this.routes = [];
+    this.routesById = new Map();
+    this.checkpoints = [];
 
     this.curve = new THREE.CatmullRomCurve3(
       this.map.controlPoints.map(([x, z]) => new THREE.Vector3(x, 0, z)),
@@ -45,11 +54,217 @@ export class Track {
     this.length = this.curve.getLength();
     this.segmentLength = this.length / SEGMENTS;
     this.startS = this.map.startS ?? 24;
+    this.elevation = this.normalizeElevation(this.map.elevation ?? [], {
+      closed: true,
+      start: this.map.startHeight ?? 0,
+    });
 
     this.buildSamples();
     this.buildCurvature();
+    this.buildRoutes();
     this.bounds = this.computeBounds();
-    this.build();
+    this.buildCheckpoints();
+
+    if (this.headless) this.buildFeatureData();
+    else this.build();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Elevación y rutas alternativas
+  // ---------------------------------------------------------------------------
+
+  /** Normaliza keyframes `{ at, height }` (0-1) para poder interpolarlos. */
+  normalizeElevation(list, { closed = true, start = 0, end = 0 } = {}) {
+    const keys = (list ?? [])
+      .map((key) => ({
+        at: clamp(key.at ?? key.u ?? 0, 0, 1),
+        height: Number.isFinite(key.height) ? key.height : 0,
+      }))
+      .sort((a, b) => a.at - b.at);
+    if (keys.length === 0 || keys[0].at > 1e-4) keys.unshift({ at: 0, height: start });
+    if (closed) {
+      if (keys[keys.length - 1].at < 1 - 1e-4) keys.push({ at: 1, height: keys[0].height });
+      else keys[keys.length - 1] = { at: 1, height: keys[0].height };
+    } else if (keys[keys.length - 1].at < 1 - 1e-4) {
+      keys.push({ at: 1, height: end });
+    } else {
+      keys[keys.length - 1] = { at: 1, height: end };
+    }
+    return keys;
+  }
+
+  /** Interpola la altura de una lista de keyframes en `u` (0-1). */
+  heightAtU(u, keys) {
+    if (!keys || keys.length < 2) return 0;
+    const t = clamp(u, 0, 1);
+    if (t <= keys[0].at) return keys[0].height;
+    for (let i = 1; i < keys.length; i += 1) {
+      const b = keys[i];
+      if (t <= b.at) {
+        const a = keys[i - 1];
+        const span = b.at - a.at;
+        if (span <= 1e-6) return b.height;
+        const f = (t - a.at) / span;
+        const smooth = f * f * (3 - 2 * f);
+        return a.height + (b.height - a.height) * smooth;
+      }
+    }
+    return keys[keys.length - 1].height;
+  }
+
+  /** Altura del asfalto en `s` (global) sobre la ruta indicada. */
+  heightAt(s, routeId = null) {
+    const route = routeId ? this.routesById.get(routeId) : null;
+    if (route) {
+      const d = this.wrapDelta(s - route.enterS);
+      const u = clamp(d / route.span, 0, 1);
+      if (!route.elevation) return this.heightAt(this.wrapS(route.enterS + route.span * u));
+      return this.heightAtU(u, route.elevation);
+    }
+    return this.heightAtU(s / this.length, this.elevation);
+  }
+
+  /**
+   * Crea las rutas alternativas del mapa. Los extremos se enganchan
+   * automáticamente a la línea central principal, de modo que la entrada y la
+   * salida son geométricamente continuas (sin teletransportes ni costuras).
+   */
+  buildRoutes() {
+    const defs = this.map.routes ?? [];
+    defs.forEach((def, index) => {
+      const enterS = this.wrapS((def.enterAt ?? 0) * this.length);
+      const exitS = this.wrapS((def.exitAt ?? 0) * this.length);
+      let span = this.wrapDelta(exitS - enterS);
+      if (span <= 0) span += this.length;
+      const enterFrame = this.frameAt(enterS);
+      const exitFrame = this.frameAt(exitS);
+
+      const junctionInset = def.junctionInset ?? this.halfWidth * 0.72;
+      const sideSign = def.side === -1 ? -1 : 1;
+      const points = [
+        enterFrame.point.clone().addScaledVector(enterFrame.side, junctionInset * sideSign),
+      ];
+      if (def.points?.length) {
+        for (const [x, z] of def.points) points.push(new THREE.Vector3(x, 0, z));
+      } else {
+        for (const offset of def.offsets ?? []) {
+          const at = clamp(offset.u ?? offset.at ?? 0, 0, 1);
+          const gs = this.wrapS(enterS + span * at);
+          const frame = this.frameAt(gs);
+          points.push(frame.point.clone().addScaledVector(frame.side, offset.lateral ?? 0));
+        }
+      }
+      points.push(
+        exitFrame.point.clone().addScaledVector(exitFrame.side, junctionInset * sideSign),
+      );
+
+      const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal');
+      curve.arcLengthDivisions = 900;
+      const length = curve.getLength();
+      const width = def.width ?? this.map.roadWidth * 0.8;
+      const halfWidth = width / 2;
+      const shoulderWidth = def.shoulderWidth ?? Math.min(this.shoulderWidth, 3.4);
+      const route = {
+        id: def.id ?? `route-${index}`,
+        def,
+        index,
+        name: def.name ?? `Ruta ${index + 1}`,
+        risk: clamp(def.risk ?? 0.5, 0, 1),
+        side: def.side === -1 ? -1 : 1,
+        enterS,
+        exitS,
+        span,
+        length,
+        width,
+        halfWidth,
+        shoulderWidth,
+        wallOffset: halfWidth + shoulderWidth,
+        curve,
+        samples: [],
+        curvature: null,
+      };
+      const baseHeightAt = (u) => this.heightAt(this.wrapS(enterS + span * u));
+      route.elevation = def.elevation?.length
+        ? this.normalizeElevation(
+            def.elevation.map((key) => ({
+              at: key.at,
+              height: baseHeightAt(key.at ?? 0) + (key.height ?? 0),
+            })),
+            { closed: false, start: enterFrame.point.y, end: exitFrame.point.y },
+          )
+        : null;
+
+      const N = ROUTE_SEGMENTS;
+      for (let i = 0; i <= N; i += 1) {
+        const u = i / N;
+        const point = curve.getPointAt(u);
+        const tangent = curve.getTangentAt(u);
+        tangent.y = 0;
+        tangent.normalize();
+        point.y = route.elevation ? this.heightAtU(u, route.elevation) : baseHeightAt(u);
+        route.samples.push({
+          point,
+          tangent,
+          side: new THREE.Vector3(-tangent.z, 0, tangent.x),
+          u,
+          s: u * length,
+          elevation: point.y,
+        });
+      }
+      this.buildRouteCurvature(route);
+
+      this.routes.push(route);
+      this.routesById.set(route.id, route);
+    });
+  }
+
+  buildRouteCurvature(route) {
+    const N = route.samples.length;
+    const w = 6;
+    route.curvature = new Float32Array(N);
+    for (let i = 0; i < N; i += 1) {
+      const a = route.samples[Math.max(0, i - w)].tangent;
+      const b = route.samples[Math.min(N - 1, i + w)].tangent;
+      const cross = a.x * b.z - a.z * b.x;
+      const dot = a.x * b.x + a.z * b.z;
+      const ds = (Math.min(N - 1, i + w) - Math.max(0, i - w)) * (route.length / (N - 1));
+      route.curvature[i] = Math.abs(Math.atan2(cross, dot)) / Math.max(1, ds);
+    }
+  }
+
+  /** Distancia global equivalente a una distancia local de la ruta. */
+  globalSForRoute(route, localS) {
+    return this.wrapS(route.enterS + (localS / Math.max(1, route.length)) * route.span);
+  }
+
+  /** Distancia local de la ruta equivalente a una `s` global. */
+  localSForRoute(route, globalS) {
+    const d = this.wrapDelta(globalS - route.enterS);
+    if (d < 0) return 0;
+    if (d > route.span) return route.length;
+    return (d / route.span) * route.length;
+  }
+
+  /** ¿La ruta está cerca de la `s` indicada (ventana de la bifurcación)? */
+  isRouteNear(route, s, margin = 20) {
+    const d = this.wrapDelta(s - route.enterS);
+    return d > -margin && d < route.span + margin;
+  }
+
+  /** Ruta que corresponde a una `s` global (o null si es la principal). */
+  routeForS(s) {
+    for (const route of this.routes) {
+      if (this.isRouteNear(route, s, 0)) return route;
+    }
+    return null;
+  }
+
+  buildCheckpoints() {
+    const count = Math.max(4, this.map.checkpoints ?? 8);
+    this.checkpoints = [];
+    for (let i = 0; i < count; i += 1) {
+      this.checkpoints.push(this.wrapS(this.startS + ((i + 0.5) * this.length) / count));
+    }
   }
 
   /**
@@ -72,7 +287,14 @@ export class Track {
   }
 
   /** Curvatura en la distancia `s` (consulta barata, sin búsqueda binaria). */
-  curvatureAt(s) {
+  curvatureAt(s, routeId = null) {
+    const route = routeId ? this.routesById.get(routeId) : null;
+    if (route) {
+      const local = this.localSForRoute(route, s);
+      const N = route.samples.length;
+      const index = Math.min(N - 1, Math.floor((local / route.length) * (N - 1)));
+      return route.curvature[index];
+    }
     const N = this.samples.length;
     const wrapped = ((s % this.length) + this.length) % this.length;
     return this.curvature[Math.floor((wrapped / this.length) * N) % N];
@@ -89,11 +311,13 @@ export class Track {
       const tangent = this.curve.getTangentAt(u);
       tangent.y = 0;
       tangent.normalize();
+      point.y = this.heightAtU(u, this.elevation);
       this.samples.push({
         point,
         tangent,
         side: new THREE.Vector3(-tangent.z, 0, tangent.x),
         s: u * this.length,
+        elevation: point.y,
       });
     }
   }
@@ -113,10 +337,10 @@ export class Track {
   }
 
   /**
-   * Proyecta una posición sobre la línea central.
+   * Proyecta una posición sobre la línea central principal.
    * Devuelve la distancia lateral con signo, el punto central y la tangente.
    */
-  project(position) {
+  projectMain(position) {
     const N = this.samples.length;
     let bestDist2 = Infinity;
     let best = null;
@@ -154,6 +378,7 @@ export class Track {
           lateral: dx * -tz + dz * tx,
           s: (this.samples[i].s + t * this.segmentLength) % this.length,
           distance: Math.sqrt(dist2),
+          height: a.y + (b.y - a.y) * t,
         };
       }
     }
@@ -161,8 +386,108 @@ export class Track {
     return best;
   }
 
+  /** Proyecta una posición sobre la línea central de una ruta abierta. */
+  projectRoute(route, position) {
+    const samples = route.samples;
+    const N = samples.length;
+    const step = route.length / (N - 1);
+    let bestDist2 = Infinity;
+    let best = null;
+
+    for (let i = 0; i < N - 1; i += 1) {
+      const a = samples[i].point;
+      const b = samples[i + 1].point;
+      const abx = b.x - a.x;
+      const abz = b.z - a.z;
+      const apx = position.x - a.x;
+      const apz = position.z - a.z;
+      const len2 = abx * abx + abz * abz;
+      let t = len2 > 0 ? (apx * abx + apz * abz) / len2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const cx = a.x + abx * t;
+      const cz = a.z + abz * t;
+      const dx = position.x - cx;
+      const dz = position.z - cz;
+      const dist2 = dx * dx + dz * dz;
+
+      if (dist2 < bestDist2) {
+        bestDist2 = dist2;
+        const inv = 1 / (Math.sqrt(len2) || 1);
+        const tx = abx * inv;
+        const tz = abz * inv;
+        best = {
+          index: i,
+          t,
+          centerX: cx,
+          centerZ: cz,
+          tx,
+          tz,
+          sx: -tz,
+          sz: tx,
+          lateral: dx * -tz + dz * tx,
+          localS: i * step + t * step,
+          distance: Math.sqrt(dist2),
+          height: a.y + (b.y - a.y) * t,
+        };
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Proyección con rutas: elige la línea central más cercana, pero conserva la
+   * ruta actual mientras la diferencia sea pequeña (histéresis). Así un kart no
+   * salta de carril al pasar junto a la boca de una bifurcación.
+   */
+  project(position, currentRouteId = null, hintS = null) {
+    const main = this.projectMain(position);
+    if (!main) return null;
+    // Sin arrays ni objetos nuevos por llamada: la proyección se ejecuta varias
+    // veces por kart y fotograma y no debe generar basura.
+    main.routeId = null;
+    main.halfWidth = this.halfWidth;
+    main.wallOffset = this.wallOffset;
+    let best = main;
+    let current = currentRouteId ? null : main;
+
+    const hint = Number.isFinite(hintS) ? hintS : main.s;
+    for (const route of this.routes) {
+      if (!this.isRouteNear(route, hint)) continue;
+      const projected = this.projectRoute(route, position);
+      if (!projected) continue;
+      projected.s = this.globalSForRoute(route, projected.localS);
+      projected.routeId = route.id;
+      projected.routeU = projected.localS / Math.max(1, route.length);
+      projected.halfWidth = route.halfWidth;
+      projected.wallOffset = route.wallOffset;
+      if (projected.distance < best.distance) best = projected;
+      if (projected.routeId === currentRouteId) current = projected;
+    }
+
+    if (current && current !== best && current.distance <= best.distance + 2.2) {
+      return current;
+    }
+    return best;
+  }
+
   /** Punto, tangente y lado en una distancia de arco concreta. */
-  frameAt(s) {
+  frameAt(s, routeId = null) {
+    const route = routeId ? this.routesById.get(routeId) : null;
+    if (route) {
+      const localS = this.localSForRoute(route, s);
+      const N = route.samples.length;
+      const f = (localS / Math.max(1, route.length)) * (N - 1);
+      const i = Math.max(0, Math.min(N - 2, Math.floor(f)));
+      const t = clamp(f - i, 0, 1);
+      const a = route.samples[i];
+      const b = route.samples[i + 1];
+      const point = new THREE.Vector3().lerpVectors(a.point, b.point, t);
+      const tangent = new THREE.Vector3().lerpVectors(a.tangent, b.tangent, t).normalize();
+      const side = new THREE.Vector3(-tangent.z, 0, tangent.x);
+      return { point, tangent, side, route, u: clamp(localS / Math.max(1, route.length), 0, 1) };
+    }
+
     const N = this.samples.length;
     // Blindaje: una distancia no finita (estado transitorio, reubicación
     // manual o un valor pendiente de reiniciar) no debe romper el bucle de
@@ -178,16 +503,16 @@ export class Track {
     const point = new THREE.Vector3().lerpVectors(a.point, b.point, t);
     const tangent = new THREE.Vector3().lerpVectors(a.tangent, b.tangent, t).normalize();
     const side = new THREE.Vector3(-tangent.z, 0, tangent.x);
-    return { point, tangent, side };
+    return { point, tangent, side, route: null, u: wrapped / this.length };
   }
 
-  posAt(s, lateral = 0) {
-    const frame = this.frameAt(s);
+  posAt(s, lateral = 0, routeId = null) {
+    const frame = this.frameAt(s, routeId);
     return frame.point.clone().addScaledVector(frame.side, lateral);
   }
 
-  headingAt(s) {
-    const tangent = this.frameAt(s).tangent;
+  headingAt(s, routeId = null) {
+    const tangent = this.frameAt(s, routeId).tangent;
     return Math.atan2(tangent.x, tangent.z);
   }
 
@@ -199,6 +524,7 @@ export class Track {
     this.buildGround();
     this.buildRoad();
     this.buildRoadDetails();
+    this.buildRouteRoads();
     this.buildSkidMarks();
     this.buildBrakingBoards();
     this.buildWalls();
@@ -206,7 +532,102 @@ export class Track {
     this.buildArch();
     this.buildScenery();
     this.buildTracksideDetails();
+    this.buildRoadSupports();
     this.buildFeatures();
+  }
+
+  /** Asfalto, pianos y arcenes de cada ruta alternativa. */
+  buildRouteRoads() {
+    if (this.routes.length === 0) return;
+    for (const route of this.routes) {
+      const road = new THREE.Mesh(
+        this.createRouteRibbonRange(route, 0, route.length, -route.halfWidth, route.halfWidth, 0.028, 'length', 9),
+        this.roadMaterial,
+      );
+      road.receiveShadow = true;
+      road.name = `asfalto-${route.id}`;
+      this.group.add(road);
+
+      const lineInner = route.halfWidth - 0.62;
+      const lineOuter = route.halfWidth - 0.2;
+      for (const sign of [-1, 1]) {
+        const a = sign > 0 ? lineInner : -lineOuter;
+        const b = sign > 0 ? lineOuter : -lineInner;
+        const line = new THREE.Mesh(
+          this.createRouteRibbonRange(route, 0, route.length, a, b, 0.046, 'length', 10),
+          this.whiteMaterial,
+        );
+        line.receiveShadow = true;
+        this.group.add(line);
+
+        const curbA = sign > 0 ? route.halfWidth : -route.halfWidth - this.curbWidth;
+        const curbB = sign > 0 ? route.halfWidth + this.curbWidth : -route.halfWidth;
+        const curb = new THREE.Mesh(
+          this.createRouteRibbonRange(route, 0, route.length, curbA, curbB, 0.042, 'stripes', 6),
+          this.stripeMaterial,
+        );
+        curb.receiveShadow = true;
+        this.group.add(curb);
+
+        const shoulderA = sign > 0 ? route.halfWidth + this.curbWidth : -route.wallOffset;
+        const shoulderB = sign > 0 ? route.wallOffset : -route.halfWidth - this.curbWidth;
+        const shoulder = new THREE.Mesh(
+          this.createRouteRibbonRange(route, 0, route.length, shoulderA, shoulderB, 0.012, 'length', 22),
+          this.shoulderMaterial,
+        );
+        shoulder.receiveShadow = true;
+        shoulder.name = `arcen-${route.id}`;
+        this.group.add(shoulder);
+      }
+    }
+  }
+
+  /** Pilares bajo los tramos elevados: la pista se lee como un viaducto. */
+  buildRoadSupports() {
+    const supports = [];
+    const collect = (route) => {
+      const length = route ? route.length : this.length;
+      const step = 26;
+      for (let s = 12; s < length - 12; s += step) {
+        const globalS = route ? this.globalSForRoute(route, s) : s;
+        const frame = this.frameAt(globalS, route?.id ?? null);
+        const height = frame.point.y;
+        if (height < 1.4) continue;
+        const lateral = route ? route.halfWidth * 0.52 : this.halfWidth * 0.52;
+        for (const sign of [-1, 1]) {
+          supports.push({
+            x: frame.point.x + frame.side.x * lateral * sign,
+            z: frame.point.z + frame.side.z * lateral * sign,
+            height: height - 0.28,
+          });
+        }
+      }
+    };
+    collect(null);
+    for (const route of this.routes) collect(route);
+    if (supports.length === 0) return;
+
+    const geometry = new THREE.BoxGeometry(1.15, 1, 1.15);
+    const material = new THREE.MeshStandardMaterial({
+      color: this.map.scenery === 'orbital' ? 0x2a3157 : 0x4a4f5e,
+      roughness: 0.72,
+      metalness: 0.24,
+    });
+    const pillars = new THREE.InstancedMesh(geometry, material, supports.length);
+    pillars.name = 'pilares-elevados';
+    pillars.castShadow = true;
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const position = new THREE.Vector3();
+    supports.forEach((support, index) => {
+      position.set(support.x, support.height / 2, support.z);
+      scale.set(1, Math.max(0.6, support.height), 1);
+      matrix.compose(position, quaternion, scale);
+      pillars.setMatrixAt(index, matrix);
+    });
+    pillars.instanceMatrix.needsUpdate = true;
+    this.group.add(pillars);
   }
 
   buildGround() {
@@ -488,7 +909,7 @@ export class Track {
       const az = frame.point.z + frame.side.z * (lateral - half);
       const bx = frame.point.x + frame.side.x * (lateral + half);
       const bz = frame.point.z + frame.side.z * (lateral + half);
-      positions.push(ax, 0.044, az, bx, 0.044, bz);
+      positions.push(ax, frame.point.y + 0.044, az, bx, frame.point.y + 0.044, bz);
       const v = t * 3;
       uvs.push(0, v, 1, v);
     }
@@ -536,7 +957,7 @@ export class Track {
         const x = frame.point.x + frame.side.x * lateral;
         const z = frame.point.z + frame.side.z * lateral;
         const group = new THREE.Group();
-        group.position.set(x, 0, z);
+        group.position.set(x, frame.point.y, z);
         group.rotation.y = Math.atan2(frame.tangent.x, frame.tangent.z) + Math.PI;
 
         const post = new THREE.Mesh(postGeometry, postMaterial);
@@ -593,7 +1014,7 @@ export class Track {
         const x = frame.point.x + frame.side.x * stack.lateral;
         const z = frame.point.z + frame.side.z * stack.lateral;
         for (let level = 0; level < perStack; level += 1) {
-          const position = new THREE.Vector3(x, 0.24 + level * 0.36, z);
+          const position = new THREE.Vector3(x, frame.point.y + 0.24 + level * 0.36, z);
           matrix.compose(position, quaternion, scale);
           tires.setMatrixAt(index, matrix);
           const shade = 0.1 + level * 0.025;
@@ -645,14 +1066,14 @@ export class Track {
         const lateral = sign * (this.wallOffset + 1.7);
         const x = frame.point.x + frame.side.x * lateral;
         const z = frame.point.z + frame.side.z * lateral;
-        matrix.compose(new THREE.Vector3(x, 1.55, z), new THREE.Quaternion(), scale);
+        matrix.compose(new THREE.Vector3(x, frame.point.y + 1.55, z), new THREE.Quaternion(), scale);
         poles.setMatrixAt(index, matrix);
 
         euler.set(0, heading, 0);
         flagQuat.setFromEuler(euler);
         const fx = x + frame.side.x * sign * 0.95;
         const fz = z + frame.side.z * sign * 0.95;
-        matrix.compose(new THREE.Vector3(fx, 2.55, fz), flagQuat, scale);
+        matrix.compose(new THREE.Vector3(fx, frame.point.y + 2.55, fz), flagQuat, scale);
         flags.setMatrixAt(index, matrix);
         const color = (Math.floor(i / 2) + (sign > 0 ? 0 : 1)) % 3 === 0 ? white : accent;
         flags.setColorAt(index, color);
@@ -665,6 +1086,57 @@ export class Track {
     this.group.add(poles, flags);
   }
 
+
+  /**
+   * Muros por tramos: se abren huecos en la salida y la entrada de cada ruta
+   * para que la bifurcación sea físicamente transitable.
+   */
+  wallRuns() {
+    const gapsBySide = new Map([
+      [-1, []],
+      [1, []],
+    ]);
+    for (const route of this.routes) {
+      const gaps = gapsBySide.get(route.side) ?? [];
+      gaps.push([route.enterS - 12, route.enterS + 24]);
+      gaps.push([route.exitS - 24, route.exitS + 12]);
+    }
+
+    const runs = [];
+    for (const sign of [-1, 1]) {
+      for (const [from, to] of this.subtractRanges(0, this.length, gapsBySide.get(sign) ?? [])) {
+        if (to - from > 4) runs.push({ kind: 'main', route: null, sign, from, to });
+      }
+    }
+    for (const route of this.routes) {
+      for (const sign of [-1, 1]) {
+        const from = 15;
+        const to = route.length - 15;
+        if (to - from > 4) runs.push({ kind: 'route', route, sign, from, to });
+      }
+    }
+    return runs;
+  }
+
+  subtractRanges(start, end, gaps) {
+    let ranges = [[start, end]];
+    for (const [rawA, rawB] of gaps) {
+      const a = Math.max(start, rawA);
+      const b = Math.min(end, rawB);
+      if (b <= a) continue;
+      const next = [];
+      for (const [c, d] of ranges) {
+        if (b <= c || a >= d) {
+          next.push([c, d]);
+          continue;
+        }
+        if (a > c) next.push([c, a]);
+        if (b < d) next.push([b, d]);
+      }
+      ranges = next;
+    }
+    return ranges;
+  }
 
   buildWalls() {
     const isCity = this.map.scenery === 'city';
@@ -680,39 +1152,43 @@ export class Track {
       roughness: 0.8,
     });
 
-    for (const sign of [-1, 1]) {
-      const offset = this.wallOffset * sign;
+    const runs = this.wallRuns();
+    const postSlots = [];
+    for (const run of runs) {
+      const wallOffset = run.route ? run.route.wallOffset : this.wallOffset;
+      const offset = wallOffset * run.sign;
       const face = new THREE.Mesh(
-        this.createVerticalRibbon(offset, CONFIG.wallHeight, 'stripes', 6),
+        this.createRunWall(run, offset, CONFIG.wallHeight),
         this.wallMaterial,
       );
       face.receiveShadow = true;
       this.group.add(face);
 
-      // Remate superior del muro.
       const cap = new THREE.Mesh(
-        this.createHorizontalRibbon(offset, offset + sign * 0.55, CONFIG.wallHeight, 'stripes', 6),
+        this.createRunRibbon(run, offset, offset + run.sign * 0.55, CONFIG.wallHeight, 'stripes', 6),
         this.wallCapMaterial,
       );
       cap.receiveShadow = true;
       this.group.add(cap);
+
+      const spacing = 18;
+      const count = Math.max(1, Math.floor((run.to - run.from) / spacing));
+      for (let i = 0; i <= count; i += 1) {
+        const local = run.from + ((run.to - run.from) * i) / count;
+        postSlots.push({ run, local, wallOffset });
+      }
     }
 
-    // Postes de sujeción: ritmo visual y profundidad sin coste de draw calls.
-    const spacing = 18;
-    const count = Math.max(4, Math.floor(this.length / spacing));
+    if (postSlots.length === 0) return;
     const postGeometry = new THREE.BoxGeometry(0.18, CONFIG.wallHeight + 0.46, 0.18);
     const postMaterial = new THREE.MeshStandardMaterial({
       color: 0x2c3446,
       roughness: 0.55,
       metalness: 0.28,
     });
-    const posts = new THREE.InstancedMesh(postGeometry, postMaterial, count * 2);
+    const posts = new THREE.InstancedMesh(postGeometry, postMaterial, postSlots.length);
     posts.name = 'postes-del-muro';
     posts.castShadow = true;
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    const scale = new THREE.Vector3(1, 1, 1);
     const night = isCity || this.map.scenery === 'neon' || this.map.scenery === 'orbital';
     const reflectors = night
       ? new THREE.InstancedMesh(
@@ -721,40 +1197,45 @@ export class Track {
             color: new THREE.Color(this.map.accent ?? '#5fe6ff'),
             toneMapped: false,
           }),
-          count * 2,
+          postSlots.length,
         )
       : null;
     if (reflectors) reflectors.name = 'balizas-del-muro';
 
-    let index = 0;
-    for (let i = 0; i < count; i += 1) {
-      const s = (i / count) * this.length;
-      const frame = this.frameAt(s);
-      const heading = Math.atan2(frame.tangent.x, frame.tangent.z);
-      quaternion.setFromEuler(new THREE.Euler(0, heading, 0));
-      for (const sign of [-1, 1]) {
-        const lateral = sign * (this.wallOffset + 0.09);
-        const x = frame.point.x + frame.side.x * lateral;
-        const z = frame.point.z + frame.side.z * lateral;
-        matrix.compose(new THREE.Vector3(x, (CONFIG.wallHeight + 0.46) / 2, z), quaternion, scale);
-        posts.setMatrixAt(index, matrix);
-        if (reflectors) {
-          matrix.compose(
-            new THREE.Vector3(x, CONFIG.wallHeight + 0.4, z),
-            quaternion,
-            scale,
-          );
-          reflectors.setMatrixAt(index, matrix);
-        }
-        index += 1;
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3(1, 1, 1);
+    const point = new THREE.Vector3();
+    postSlots.forEach((slot, index) => {
+      const frame = this.runFrame(slot.run, slot.local);
+      const lateral = slot.run.sign * (slot.wallOffset + 0.09);
+      const x = frame.point.x + frame.side.x * lateral;
+      const z = frame.point.z + frame.side.z * lateral;
+      quaternion.setFromEuler(new THREE.Euler(0, Math.atan2(frame.tangent.x, frame.tangent.z), 0));
+      point.set(x, frame.point.y + (CONFIG.wallHeight + 0.46) / 2, z);
+      matrix.compose(point, quaternion, scale);
+      posts.setMatrixAt(index, matrix);
+      if (reflectors) {
+        point.set(x, frame.point.y + CONFIG.wallHeight + 0.4, z);
+        matrix.compose(point, quaternion, scale);
+        reflectors.setMatrixAt(index, matrix);
       }
-    }
+    });
     posts.instanceMatrix.needsUpdate = true;
     this.group.add(posts);
     if (reflectors) {
       reflectors.instanceMatrix.needsUpdate = true;
       this.group.add(reflectors);
     }
+  }
+
+  /** Frame de un tramo de muro (principal o ruta) en su distancia local. */
+  runFrame(run, local) {
+    if (run.route) {
+      const s = this.globalSForRoute(run.route, local);
+      return this.frameAt(s, run.route.id);
+    }
+    return this.frameAt(local);
   }
 
   buildStartLine() {
@@ -780,7 +1261,7 @@ export class Track {
       for (const offset of [-this.halfWidth, this.halfWidth]) {
         positions.push(
           frame.point.x + frame.side.x * offset,
-          0.055,
+          frame.point.y + 0.055,
           frame.point.z + frame.side.z * offset,
         );
       }
@@ -892,12 +1373,74 @@ export class Track {
   // Mecánicas de mapa: placas de turbo, rampas y obstáculos móviles
   // ---------------------------------------------------------------------------
 
-  buildFeatures() {
+  /** Datos de las mecánicas, sin mallas (también se usa en modo headless). */
+  buildFeatureData() {
     this.features = { boostPads: [], ramps: [], obstacles: [] };
     const config = this.map.features ?? {};
-    const accent = new THREE.Color(this.map.accent ?? '#5fe6ff');
 
-    const pads = config.boostPads ?? [];
+    (config.boostPads ?? []).forEach((def, index) => {
+      const place = this.featurePlacement(def);
+      this.features.boostPads.push({
+        id: `boost-${index}`,
+        def,
+        ...place,
+        width: def.width ?? 4.8,
+        length: def.length ?? 10,
+        lateral: def.lateral ?? 0,
+      });
+    });
+
+    (config.ramps ?? []).forEach((def, index) => {
+      const place = this.featurePlacement(def);
+      this.features.ramps.push({
+        id: `ramp-${index}`,
+        def,
+        ...place,
+        width: def.width ?? 6,
+        length: def.length ?? 10,
+        height: def.height ?? 2.2,
+        lateral: def.lateral ?? 0,
+      });
+    });
+
+    (config.obstacles ?? []).forEach((def, index) => {
+      const place = this.featurePlacement(def);
+      this.features.obstacles.push({
+        id: `obs-${index}`,
+        def,
+        kind: def.kind ?? 'gate',
+        ...place,
+        width: def.width ?? 3,
+        height: def.height ?? 2,
+        depth: def.depth ?? 2,
+        baseLateral: def.lateral ?? 0,
+        lateral: def.lateral ?? 0,
+        amplitude: def.amplitude ?? 0,
+        speed: def.speed ?? 1,
+        phase: def.phase ?? 0,
+      });
+    });
+  }
+
+  /** Resuelve `at` sobre la ruta indicada (`def.route`) o sobre la principal. */
+  featurePlacement(def) {
+    const route = def.route ? this.routesById.get(def.route) : null;
+    if (route) {
+      const at = clamp(def.at ?? 0, 0, 1);
+      const localS = at * route.length;
+      const s = this.globalSForRoute(route, localS);
+      return { route, routeId: route.id, localS, s, frame: this.frameAt(s, route.id) };
+    }
+    const s = this.wrapS((def.at ?? 0) * this.length);
+    return { route: null, routeId: null, localS: s, s, frame: this.frameAt(s) };
+  }
+
+  buildFeatures() {
+    this.buildFeatureData();
+    const accent = new THREE.Color(this.map.accent ?? '#5fe6ff');
+    const config = this.map.features ?? {};
+
+    const pads = this.features.boostPads;
     if (pads.length > 0) {
       this.boostTexture = createBoostPadTexture(this.map.accent ?? '#5fe6ff');
       // Mezcla normal: la placa se lee como pintura sobre el asfalto. Con
@@ -927,9 +1470,9 @@ export class Track {
         toneMapped: false,
       });
     }
-    pads.forEach((def, index) => this.buildBoostPad(def, index));
+    pads.forEach((pad, index) => this.buildBoostPad(pad, index));
 
-    const ramps = config.ramps ?? [];
+    const ramps = this.features.ramps;
     if (ramps.length > 0) {
       this.rampGlowMaterial = new THREE.MeshBasicMaterial({
         color: accent,
@@ -940,10 +1483,10 @@ export class Track {
         toneMapped: false,
       });
     }
-    ramps.forEach((def, index) => this.buildRamp(def, index, accent));
+    ramps.forEach((ramp, index) => this.buildRamp(ramp, index, accent));
 
-    const obstacles = config.obstacles ?? [];
-    if (obstacles.some((def) => (def.kind ?? 'gate') === 'gate')) {
+    const obstacles = this.features.obstacles;
+    if (obstacles.some((item) => item.kind === 'gate')) {
       this.energyTexture = createEnergyFieldTexture(this.map.accent ?? '#5fe6ff');
       this.energyTexture.repeat.set(1, 2.4);
       this.energyMaterial = new THREE.MeshBasicMaterial({
@@ -956,19 +1499,16 @@ export class Track {
         side: THREE.DoubleSide,
       });
     }
-    obstacles.forEach((def, index) => this.buildObstacle(def, index, accent));
+    obstacles.forEach((obstacle, index) => this.buildObstacle(obstacle, index, accent));
   }
 
   /** Coloca una placa de aceleración orientada con la pista. */
-  buildBoostPad(def, index) {
-    const s = this.wrapS(def.at * this.length);
-    const frame = this.frameAt(s);
-    const width = def.width ?? 4.8;
-    const length = def.length ?? 10;
+  buildBoostPad(item, index) {
+    const { def, frame, width, length } = item;
     const group = new THREE.Group();
     group.name = `turbo-${index}`;
-    group.position.copy(frame.point).addScaledVector(frame.side, def.lateral ?? 0);
-    group.position.y = 0.065;
+    group.position.copy(frame.point).addScaledVector(frame.side, item.lateral);
+    group.position.y = frame.point.y + 0.065;
     group.rotation.y = Math.atan2(frame.tangent.x, frame.tangent.z);
 
     const plane = new THREE.Mesh(new THREE.PlaneGeometry(width, length), this.boostMaterial);
@@ -994,28 +1534,16 @@ export class Track {
     }
 
     this.group.add(group);
-    this.features.boostPads.push({
-      id: `boost-${index}`,
-      def,
-      s,
-      width,
-      length,
-      lateral: def.lateral ?? 0,
-      group,
-    });
+    item.group = group;
   }
 
   /** Rampa en cuña con carril luminoso. La entrada está en -length/2. */
-  buildRamp(def, index, accent) {
-    const s = this.wrapS(def.at * this.length);
-    const frame = this.frameAt(s);
-    const width = def.width ?? 6;
-    const length = def.length ?? 10;
-    const height = def.height ?? 2.2;
+  buildRamp(item, index, accent) {
+    const { frame, width, length, height } = item;
     const group = new THREE.Group();
     group.name = `rampa-${index}`;
-    group.position.copy(frame.point).addScaledVector(frame.side, def.lateral ?? 0);
-    group.position.y = 0.03;
+    group.position.copy(frame.point).addScaledVector(frame.side, item.lateral);
+    group.position.y = frame.point.y + 0.03;
     group.rotation.y = Math.atan2(frame.tangent.x, frame.tangent.z);
 
     const rampMaterial = new THREE.MeshStandardMaterial({
@@ -1060,25 +1588,12 @@ export class Track {
     }
 
     this.group.add(group);
-    this.features.ramps.push({
-      id: `ramp-${index}`,
-      def,
-      s,
-      width,
-      length,
-      height,
-      lateral: def.lateral ?? 0,
-      group,
-    });
+    item.group = group;
   }
 
   /** Obstáculo móvil: puerta de energía, roca o plataforma deslizante. */
-  buildObstacle(def, index, accent) {
-    const s = this.wrapS(def.at * this.length);
-    const width = def.width ?? 3;
-    const height = def.height ?? 2;
-    const depth = def.depth ?? 2;
-    const frame = this.frameAt(s);
+  buildObstacle(item, index, accent) {
+    const { def, width, height, depth, frame } = item;
     const group = new THREE.Group();
     group.name = `${def.kind}-${index}`;
     group.rotation.y = Math.atan2(frame.tangent.x, frame.tangent.z);
@@ -1242,27 +1757,12 @@ export class Track {
       }
     }
 
-    const obstacle = {
-      id: `obs-${index}`,
-      def,
-      kind: def.kind ?? 'gate',
-      s,
-      width,
-      height,
-      depth,
-      baseLateral: def.lateral ?? 0,
-      lateral: def.lateral ?? 0,
-      amplitude: def.amplitude ?? 0,
-      speed: def.speed ?? 1,
-      phase: def.phase ?? 0,
-      group,
-      glowMaterial,
-      spinMesh,
-    };
+    item.group = group;
+    item.glowMaterial = glowMaterial;
+    item.spinMesh = spinMesh;
 
-    this.positionObstacle(obstacle, 0);
+    this.positionObstacle(item, 0);
     this.group.add(group);
-    this.features.obstacles.push(obstacle);
   }
 
   positionObstacle(obstacle, time) {
@@ -1270,9 +1770,9 @@ export class Track {
       obstacle.baseLateral +
       (obstacle.amplitude > 0 ? Math.sin(time * obstacle.speed + obstacle.phase) * obstacle.amplitude : 0);
     obstacle.lateral = lateral;
-    const frame = this.frameAt(obstacle.s);
+    const frame = obstacle.frame;
     obstacle.group.position.copy(frame.point).addScaledVector(frame.side, lateral);
-    obstacle.group.position.y = 0.03;
+    obstacle.group.position.y = frame.point.y + 0.03;
     obstacle.group.rotation.y = Math.atan2(frame.tangent.x, frame.tangent.z);
   }
 
@@ -1306,11 +1806,76 @@ export class Track {
     }
   }
 
+  /**
+   * Distancia (en metros de la ruta activa) entre el kart y una mecánica.
+   * Devuelve null si la mecánica pertenece a otro camino.
+   */
+  featureDelta(item, kart) {
+    if ((item.routeId ?? null) !== (kart.route ?? null)) return null;
+    if (item.routeId) {
+      const route = this.routesById.get(item.routeId);
+      if (!route) return null;
+      return this.localSForRoute(route, kart.trackS) - item.localS;
+    }
+    return this.wrapDelta(kart.trackS - item.s);
+  }
+
+  /** Placa de turbo pisada por el kart (null si no la toca o está en otra ruta). */
+  boostPadContact(kart, pad, raceTime = 0) {
+    const delta = this.featureDelta(pad, kart);
+    if (delta === null) return null;
+    if (Math.abs(delta) > pad.length / 2 + 0.8) return null;
+    if (Math.abs(kart.lateral - pad.lateral) > pad.width / 2 + 0.55) return null;
+    if ((kart.featureCooldowns.get(pad.id) ?? 0) > raceTime) return null;
+    return pad;
+  }
+
+  /** Obstáculo tocado por el kart, con el lado del empuje. */
+  obstacleContact(kart, obstacle, raceTime = 0) {
+    const delta = this.featureDelta(obstacle, kart);
+    if (delta === null) return null;
+    if (Math.abs(delta) > obstacle.depth / 2 + 1.15) return null;
+    if (Math.abs(kart.lateral - obstacle.lateral) > obstacle.width / 2 + 0.95) return null;
+    if (kart.height > obstacle.height + 0.35) return null;
+    if ((kart.featureCooldowns.get(obstacle.id) ?? 0) > raceTime) return null;
+    return { obstacle, side: Math.sign(kart.lateral - obstacle.lateral) || 1 };
+  }
+
+  /**
+   * Aplica la rampa al kart y devuelve si acaba de despegar. Compartido por la
+   * partida y por las pruebas para que el salto no dependa del render.
+   */
+  applyRamp(kart) {
+    if (!this.features || kart.finished) return { launched: false, onRamp: false };
+    const onRamp = this.rampAt(kart);
+
+    if (onRamp && !kart.airborne) {
+      kart.setRampHeight(onRamp.height);
+      return { launched: false, onRamp: true };
+    }
+
+    if (!kart.airborne && kart.rampHeight > 0.3) {
+      if (kart.speed > 5) {
+        const launch =
+          CONFIG.air.launchBase +
+          Math.min(34, Math.max(0, kart.speed)) * CONFIG.air.launchPerSpeed +
+          kart.rampHeight * 0.1;
+        kart.startJump(launch);
+        return { launched: true, onRamp: false };
+      }
+      kart.setRampHeight(0);
+    } else if (!kart.airborne) {
+      kart.setRampHeight(0);
+    }
+    return { launched: false, onRamp: false };
+  }
+
   /** Devuelve la rampa que pisa el kart, con la altura correspondiente. */
   rampAt(kart) {
     if (!this.features) return null;
     for (const ramp of this.features.ramps) {
-      const delta = this.wrapDelta(kart.trackS - ramp.s);
+      const delta = this.featureDelta(ramp, kart);
+      if (delta === null) continue;
       if (Math.abs(delta) > ramp.length / 2) continue;
       if (Math.abs(kart.lateral - ramp.lateral) > ramp.width / 2) continue;
       const progress = clamp((delta + ramp.length / 2) / ramp.length, 0, 1);
@@ -2187,6 +2752,76 @@ export class Track {
   // Generadores de cintas de geometría
   // ---------------------------------------------------------------------------
 
+  /** Cinta horizontal sobre un tramo concreto (principal o ruta). */
+  createRunRibbon(run, offsetA, offsetB, y, uvMode = 'length', uScale = 8) {
+    const positions = [];
+    const uvs = [];
+    const indices = [];
+    const steps = Math.max(2, Math.ceil((run.to - run.from) / 2.2));
+
+    for (let i = 0; i <= steps; i += 1) {
+      const local = run.from + ((run.to - run.from) * i) / steps;
+      const frame = this.runFrame(run, local);
+      const baseY = frame.point.y + y;
+      const ax = frame.point.x + frame.side.x * offsetA;
+      const az = frame.point.z + frame.side.z * offsetA;
+      const bx = frame.point.x + frame.side.x * offsetB;
+      const bz = frame.point.z + frame.side.z * offsetB;
+      positions.push(ax, baseY, az, bx, baseY, bz);
+
+      const u = local / uScale;
+      if (uvMode === 'stripes') uvs.push(u, 0, u, 1);
+      else uvs.push(0, u, 1, u);
+    }
+
+    for (let i = 0; i < steps; i += 1) {
+      const a = i * 2;
+      indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    return geometry;
+  }
+
+  /** Muro vertical sobre un tramo concreto (principal o ruta). */
+  createRunWall(run, offset, height) {
+    const positions = [];
+    const uvs = [];
+    const indices = [];
+    const steps = Math.max(2, Math.ceil((run.to - run.from) / 2.2));
+
+    for (let i = 0; i <= steps; i += 1) {
+      const local = run.from + ((run.to - run.from) * i) / steps;
+      const frame = this.runFrame(run, local);
+      const x = frame.point.x + frame.side.x * offset;
+      const z = frame.point.z + frame.side.z * offset;
+      const baseY = frame.point.y;
+      positions.push(x, baseY, z, x, baseY + height, z);
+      const u = local / 6;
+      uvs.push(u, 0, u, 1);
+    }
+
+    for (let i = 0; i < steps; i += 1) {
+      const a = i * 2;
+      indices.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    return geometry;
+  }
+
+  createRouteRibbonRange(route, from, to, offsetA, offsetB, y, uvMode = 'length', uScale = 8) {
+    return this.createRunRibbon({ route, from, to }, offsetA, offsetB, y, uvMode, uScale);
+  }
+
   /**
    * Cinta horizontal siguiendo la pista.
    * uvMode 'length': U cruza el ancho, V avanza a lo largo.
@@ -2200,11 +2835,12 @@ export class Track {
 
     for (let i = 0; i <= N; i += 1) {
       const sample = this.samples[i % N];
+      const baseY = sample.point.y + y;
       const ax = sample.point.x + sample.side.x * offsetA;
       const az = sample.point.z + sample.side.z * offsetA;
       const bx = sample.point.x + sample.side.x * offsetB;
       const bz = sample.point.z + sample.side.z * offsetB;
-      positions.push(ax, y, az, bx, y, bz);
+      positions.push(ax, baseY, az, bx, baseY, bz);
 
       if (uvMode === 'stripes') {
         const u = (i === N ? this.length : sample.s) / uScale;
@@ -2239,7 +2875,8 @@ export class Track {
       const sample = this.samples[i % N];
       const x = sample.point.x + sample.side.x * offset;
       const z = sample.point.z + sample.side.z * offset;
-      positions.push(x, 0, z, x, height, z);
+      const baseY = sample.point.y;
+      positions.push(x, baseY, z, x, baseY + height, z);
       const u = (i === N ? this.length : sample.s) / uScale;
       uvs.push(u, 0, u, 1);
     }

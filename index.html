@@ -54,6 +54,16 @@
           </div>
         </div>
 
+        <div id="hud-online-race" class="online-race hidden" aria-label="Clasificación online">
+          <div class="online-race-head">
+            <span>ONLINE</span>
+            <b id="online-race-code">-----</b>
+          </div>
+          <ol id="online-race-list" class="online-race-list"></ol>
+        </div>
+
+        <div id="online-toast" class="online-toast hidden" role="status" aria-live="polite"></div>
+
         <div class="hud-bottom">
           <div class="minimap-card">
             <div class="minimap-head">
@@ -99,6 +109,11 @@
         <div id="lap-toast" class="lap-toast" role="status" aria-live="polite">
           <span>VUELTA</span>
           <b id="lap-toast-value">2 / 3</b>
+        </div>
+
+        <div id="overtake-toast" class="overtake-toast" role="status" aria-live="polite">
+          <span>ADELANTAMIENTO</span>
+          <b id="overtake-position">2º</b>
         </div>
 
         <div id="stun-banner" class="stun-banner hidden" role="status" aria-live="assertive">
@@ -385,15 +400,124 @@
           </div>
 
           <div class="menu-actions">
+            <p id="menu-notice" class="menu-notice hidden" role="status" aria-live="polite"></p>
             <button id="btn-start" class="btn btn-primary" type="button">
               <span class="btn-kicker">LISTO PARA LA PARRILLA</span>
               <span class="btn-label">Empezar carrera <span class="btn-icon">▶</span></span>
+            </button>
+            <button id="btn-online" class="btn btn-secondary btn-online" type="button">
+              <span class="btn-kicker">SALAS PRIVADAS</span>
+              <span class="btn-label">Multijugador online <span class="btn-icon">◎</span></span>
             </button>
             <p class="footnote">
               Pulsa <kbd>Enter</kbd> o el botón. En móvil, conduce con los botones en pantalla.
             </p>
           </div>
           <div class="checker-strip bottom"></div>
+        </div>
+      </section>
+
+      <!-- ===================== MULTIJUGADOR ONLINE ===================== -->
+      <section id="screen-online" class="overlay hidden">
+        <div class="panel online-panel">
+          <div class="online-topbar">
+            <button id="btn-online-back" class="icon-btn shop-back" type="button" aria-label="Volver al menú">
+              ←
+            </button>
+            <div class="online-title">
+              <p class="eyebrow">MULTIJUGADOR ONLINE</p>
+              <h2 class="panel-title">Salas privadas</h2>
+            </div>
+            <span id="online-connection" class="online-chip is-offline">Desconectado</span>
+          </div>
+
+          <div id="online-home" class="online-home">
+            <label class="online-field">
+              <span>TU NOMBRE</span>
+              <input
+                id="online-name"
+                type="text"
+                maxlength="16"
+                autocomplete="nickname"
+                placeholder="Piloto"
+                aria-label="Tu nombre de jugador"
+              />
+            </label>
+
+            <div class="online-home-grid">
+              <article class="online-card">
+                <h3>Crear una sala</h3>
+                <p>Recibirás un código de 5 caracteres para compartir con tus amigos.</p>
+                <button id="btn-online-create" class="btn btn-primary" type="button">
+                  Crear sala privada
+                </button>
+              </article>
+
+              <article class="online-card">
+                <h3>Unirse a una sala</h3>
+                <label class="online-field online-field-code">
+                  <span>CÓDIGO DE INVITACIÓN</span>
+                  <input
+                    id="online-code"
+                    type="text"
+                    maxlength="5"
+                    inputmode="text"
+                    autocomplete="off"
+                    autocapitalize="characters"
+                    spellcheck="false"
+                    placeholder="ABCDE"
+                    aria-label="Código de invitación"
+                  />
+                </label>
+                <button id="btn-online-join" class="btn btn-secondary" type="button">
+                  Entrar en la sala
+                </button>
+              </article>
+            </div>
+
+            <p id="online-error" class="online-error hidden" role="alert"></p>
+            <p class="footnote online-server-line">
+              Servidor: <span id="online-server">—</span>. El código no distingue mayúsculas.
+            </p>
+          </div>
+
+          <div id="online-lobby" class="online-lobby hidden">
+            <div class="online-room-head">
+              <div class="online-code-block">
+                <span>SALA</span>
+                <b id="online-room-code">-----</b>
+              </div>
+              <button id="btn-online-copy" class="btn btn-secondary btn-small" type="button">
+                Copiar código
+              </button>
+              <span id="online-status" class="online-chip">En espera</span>
+            </div>
+
+            <div class="online-lobby-grid">
+              <div class="online-players-block">
+                <h3>Pilotos <small id="online-count">1/4</small></h3>
+                <ul id="online-players" class="online-players"></ul>
+              </div>
+
+              <div class="online-setup-block">
+                <h3>Circuito de la sala</h3>
+                <select id="online-map" class="online-select" aria-label="Circuito de la sala"></select>
+                <p id="online-map-hint" class="online-hint">Solo el anfitrión puede cambiarlo.</p>
+                <div class="online-lobby-actions">
+                  <button id="btn-online-start" class="btn btn-primary" type="button">
+                    Iniciar carrera
+                  </button>
+                  <button id="btn-online-leave" class="btn btn-secondary" type="button">
+                    Abandonar sala
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <p id="online-lobby-note" class="panel-text online-lobby-note">
+              Comparte el código. La carrera empezará cuando el anfitrión pulse iniciar.
+            </p>
+          </div>
         </div>
       </section>
 

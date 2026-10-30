@@ -4,7 +4,7 @@
 // al juego con onBuy/onSelect. Así solo hay una fuente de verdad (economy.js) y
 // es imposible cobrar dos veces o quedar con saldo negativo.
 import { KartPreview } from './KartPreview.js';
-import { MAPS } from './maps.js';
+import { MAPS, MAP_ORDER } from './maps.js';
 import { PLAYER_KARTS } from './karts.js';
 import {
   coinsFor,
@@ -14,8 +14,6 @@ import {
   priceHint,
   winsNeeded,
 } from './economy.js';
-
-const MAP_ORDER = ['coast', 'mountain', 'city', 'neon', 'canyon', 'orbital'];
 
 export class Shop {
   constructor({ onBuy, onSelect, onClose }) {
@@ -107,17 +105,18 @@ export class Shop {
     return tab === 'karts' ? PLAYER_KARTS.some((k) => k.id === id) : MAP_ORDER.includes(id);
   }
 
-  /** Ficha de la tarjeta: estado, precio y etiqueta del botón. */
+  /** Ficha de la tarjeta: estado, precio, monedas que faltan y etiqueta. */
   describe(kind, item) {
     const id = item.id;
     const progress = this.progress;
     const state = itemState(progress, kind, id);
     const price = kind === 'kart' ? kartPrice(id) : mapPrice(id);
-    const coins = progress?.coins ?? 0;
+    const coins = Math.max(0, Math.floor(Number(progress?.coins) || 0));
     return {
       state,
       price,
       affordable: coins >= price,
+      missing: Math.max(0, price - coins),
       hint: priceHint(price),
     };
   }
@@ -167,20 +166,32 @@ export class Shop {
       foot.className = 'shop-card-foot';
 
       if (info.state === 'locked') {
+        const priceLine = document.createElement('span');
+        priceLine.className = 'shop-price-line';
         const priceTag = document.createElement('span');
         priceTag.className = 'shop-price';
         priceTag.title = info.hint;
         priceTag.innerHTML = `<i class="coin-icon" aria-hidden="true"></i>${info.price}`;
+        priceLine.append(priceTag);
+        if (info.missing > 0) {
+          const missing = document.createElement('span');
+          missing.className = 'shop-missing';
+          missing.textContent = `Te faltan ${info.missing}`;
+          priceLine.append(missing);
+        }
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'btn btn-buy';
         button.textContent = 'Comprar';
         button.disabled = !info.affordable;
+        button.title = !info.affordable
+          ? `Te faltan ${info.missing} monedas`
+          : `Comprar por ${info.price} monedas`;
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           this.onBuy?.(kind, item.id);
         });
-        foot.append(priceTag, button);
+        foot.append(priceLine, button);
       } else {
         const stateTag = document.createElement('span');
         stateTag.className = 'shop-state';
@@ -222,8 +233,13 @@ export class Shop {
     if (!element) return;
     const state = itemState(this.progress, kind, id);
     const price = kind === 'kart' ? kartPrice(id) : mapPrice(id);
+    const coins = Math.max(0, Math.floor(Number(this.progress?.coins) || 0));
+    const missing = Math.max(0, price - coins);
     if (state === 'locked') {
-      element.textContent = `${priceHint(price)} · cuesta ${price} monedas`;
+      element.textContent =
+        missing > 0
+          ? `Cuesta ${price} monedas · te faltan ${missing}`
+          : `Cuesta ${price} monedas · ya puedes comprarlo`;
       element.dataset.state = 'locked';
     } else if (state === 'equipped') {
       element.textContent = 'En uso';
@@ -380,19 +396,26 @@ export class Shop {
   }
 
   /** Anima la entrada de la recompensa en la pantalla de resultados. */
-  showReward({ coins, balance, difficulty, won }) {
+  showReward({ coins, balance, difficulty, won, saved = true }) {
     const block = this.el.resultsReward;
     if (!block) return;
-    block.classList.toggle('no-reward', !won);
+    block.classList.toggle('no-reward', !won || !saved);
+    block.classList.toggle('is-save-error', !saved);
     block.classList.remove('pop');
     void block.offsetWidth;
     block.classList.add('pop');
 
-    if (this.el.resultsCoins) this.el.resultsCoins.textContent = won ? `+${coins}` : '+0';
+    if (this.el.resultsCoins) {
+      this.el.resultsCoins.textContent = saved && won ? `+${coins}` : '+0';
+    }
     if (this.el.resultsLabel) {
-      this.el.resultsLabel.textContent = won
-        ? 'monedas ganadas'
-        : 'Gana la carrera para cobrar';
+      if (!saved) {
+        this.el.resultsLabel.textContent = 'No se pudo guardar la recompensa';
+      } else if (won) {
+        this.el.resultsLabel.textContent = 'monedas ganadas';
+      } else {
+        this.el.resultsLabel.textContent = 'Gana la carrera para cobrar';
+      }
     }
     if (this.el.resultsBalance) this.el.resultsBalance.textContent = String(balance);
     const difficultyEl = document.getElementById('results-difficulty');
@@ -402,7 +425,7 @@ export class Shop {
     }
 
     // Cuenta ascendente: el saldo se ve crecer moneda a moneda.
-    if (this.el.resultsBalance && won && coins > 0) {
+    if (this.el.resultsBalance && saved && won && coins > 0) {
       const from = Math.max(0, balance - coins);
       const start = performance.now();
       const duration = 700;

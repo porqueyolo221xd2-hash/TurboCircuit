@@ -34,8 +34,12 @@ export function computeAIControls(kart, track, context = {}) {
   const recoveryThreshold = tuning?.recoveryThreshold ?? 1.1;
   const recoveryTime = tuning?.recoveryTime ?? 1;
   const halfWidth = track.halfWidth;
+  // Ruta activa: la IA sigue su propio camino, no el centro de la pista.
+  const activeRoute = kart.route && track.routesById ? track.routesById.get(kart.route) ?? null : null;
+  const routeId = activeRoute?.id ?? null;
+  const routeHalfWidth = activeRoute?.halfWidth ?? track.halfWidth;
   // Los rivales se quedan lejos del borde: si no, acaban en el césped o el muro.
-  const laneLimit = Math.max(2.6, Math.min(halfWidth - 2.2, 5.4));
+  const laneLimit = Math.max(2.6, Math.min(routeHalfWidth - 2.2, 5.4));
 
   if (kart.aiOvertakeTimer > 0) {
     kart.aiOvertakeTimer = Math.max(0, kart.aiOvertakeTimer - dt);
@@ -55,7 +59,7 @@ export function computeAIControls(kart, track, context = {}) {
   // Recuperación: si lleva demasiado tiempo bloqueado, retrocede y se recoloca.
   // No se mueve la posición a mano ni se regala progreso.
   // -------------------------------------------------------------------------
-  const offTrack = Math.abs(kart.lateral) > halfWidth + 0.25;
+  const offTrack = Math.abs(kart.lateral) > routeHalfWidth + 0.25;
   const crawling = Math.abs(kart.speed) < 2.2;
   if (
     kart.aiRecoveryTime <= 0 &&
@@ -70,7 +74,7 @@ export function computeAIControls(kart, track, context = {}) {
 
   if (kart.aiRecoveryTime > 0) {
     kart.aiRecoveryTime -= dt;
-    const targetHeading = track.headingAt(kart.trackS + 4);
+    const targetHeading = track.headingAt(kart.trackS + 4, routeId);
     const diff = angleDiff(kart.heading, targetHeading);
     // Con velocidad negativa el sentido del giro se invierte; por eso el signo
     // de la dirección es directo respecto al ángulo que falta por corregir.
@@ -80,6 +84,41 @@ export function computeAIControls(kart, track, context = {}) {
       steer: clamp(diff * 1.7, -1, 1),
       drift: false,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Bifurcaciones: cada rival decide una vez por carrera si toma el ramal.
+  // La decisión se mantiene (sin bandazos) y solo se toma desde la principal.
+  // -------------------------------------------------------------------------
+  const sNow = kart.trackS;
+  let navRouteId = routeId;
+  if (track.routes?.length) {
+    if (!kart.aiRoutePlan) kart.aiRoutePlan = new Map();
+    if (kart.aiRouteIntent && kart.aiRouteIntent === routeId) kart.aiRouteIntent = null;
+    for (const branch of track.routes) {
+      if (!kart.aiRoutePlan.has(branch.id)) {
+        const riskPenalty = clamp(1 - (branch.risk ?? 0.5) * 0.6, 0.25, 1);
+        const chance = clamp(
+          (0.24 + aggression * 0.4 + precision * 0.12) * riskPenalty,
+          0.05,
+          0.88,
+        );
+        kart.aiRoutePlan.set(branch.id, Math.random() < chance);
+      }
+      if (routeId !== null) continue;
+      const ahead = track.wrapDelta(branch.enterS - sNow);
+      if (
+        kart.aiRoutePlan.get(branch.id) &&
+        ahead > -4 &&
+        ahead < 70
+      ) {
+        kart.aiRouteIntent = branch.id;
+      } else if (kart.aiRouteIntent === branch.id && ahead < -6) {
+        // No llegó a entrar: se abandona la idea y se sigue por la principal.
+        kart.aiRouteIntent = null;
+      }
+    }
+    if (kart.aiRouteIntent) navRouteId = kart.aiRouteIntent;
   }
 
   // -------------------------------------------------------------------------
@@ -152,8 +191,8 @@ export function computeAIControls(kart, track, context = {}) {
   const bendBetween = (near, far) =>
     Math.abs(
       angleDiff(
-        track.headingAt(s + near * anticipation),
-        track.headingAt(s + far * anticipation),
+        track.headingAt(s + near * anticipation, navRouteId),
+        track.headingAt(s + far * anticipation, navRouteId),
       ),
     );
   const nearBend = bendBetween(4, 18);
@@ -169,15 +208,15 @@ export function computeAIControls(kart, track, context = {}) {
   if (Math.abs(kart.speed) > 6 && severity > 0.06) {
     cornerDir = Math.sign(
       angleDiff(
-        track.headingAt(s + 4 * anticipation),
-        track.headingAt(s + 18 * anticipation),
+        track.headingAt(s + 4 * anticipation, navRouteId),
+        track.headingAt(s + 18 * anticipation, navRouteId),
       ),
     );
     if (cornerDir === 0) {
       cornerDir = Math.sign(
         angleDiff(
-          track.headingAt(s + 18 * anticipation),
-          track.headingAt(s + 34 * anticipation),
+          track.headingAt(s + 18 * anticipation, navRouteId),
+          track.headingAt(s + 34 * anticipation, navRouteId),
         ),
       );
     }
@@ -186,7 +225,7 @@ export function computeAIControls(kart, track, context = {}) {
   const weave = Math.sin(raceTime * 0.28 + kart.aiPhase) * 0.34;
   let targetLane = clamp(kart.aiLaneBase + weave, -laneLimit, laneLimit);
 
-  if (Math.abs(kart.lateral) > halfWidth - 0.3) {
+  if (Math.abs(kart.lateral) > routeHalfWidth - 0.3) {
     // Fuera del asfalto: vuelve hacia el centro sin cruzar la pista de golpe.
     targetLane = clamp(kart.lateral * 0.2, -2.6, 2.6);
   } else if (kart.aiOvertakeTimer > 0) {
@@ -219,7 +258,9 @@ export function computeAIControls(kart, track, context = {}) {
     let blocked = null;
     let blockedGap = Infinity;
     for (const obstacle of obstacles) {
-      const gapAhead = track.wrapDelta(obstacle.s - s);
+      const delta = track.featureDelta ? track.featureDelta(obstacle, kart) : null;
+      if (delta === null) continue;
+      const gapAhead = -delta;
       if (gapAhead < 2 || gapAhead > 34) continue;
       const reach = gapAhead / Math.max(9, speedNow);
       const predicted =
@@ -283,7 +324,7 @@ export function computeAIControls(kart, track, context = {}) {
   const probeDistances = [2, 8, 15, 24, 36, 52, 72];
   let targetSpeed = maxSpeed;
   for (const distance of probeDistances) {
-    const kappa = track.curvatureAt(s + distance * anticipation);
+    const kappa = track.curvatureAt(s + distance * anticipation, navRouteId);
     if (!Number.isFinite(kappa) || kappa < 1e-4) continue;
     const cornerSpeed = geometrySpeed(kappa) * cornerGrip;
     const allowed = Math.sqrt(
@@ -316,7 +357,7 @@ export function computeAIControls(kart, track, context = {}) {
     kart.aiMistakeCooldown = 6 + Math.random() * 8;
     if (
       Math.random() < mistakeChance &&
-      Math.abs(kart.lateral) < halfWidth - 1.8
+      Math.abs(kart.lateral) < routeHalfWidth - 1.8
     ) {
       kart.aiMistakeTime = 0.35 + Math.random() * 0.4;
     }
@@ -338,7 +379,7 @@ export function computeAIControls(kart, track, context = {}) {
     !kart.onGrass &&
     !kart.wallContact &&
     speedAbs > 13 &&
-    Math.abs(kart.lateral) < halfWidth - 1.5 &&
+    Math.abs(kart.lateral) < routeHalfWidth - 1.5 &&
     kart.aiMistakeTime <= 0;
 
   if (kart.aiDriftHold > 0) {
@@ -370,7 +411,13 @@ export function computeAIControls(kart, track, context = {}) {
   let lookAhead = 9.5 + Math.min(16, speedAbs * 0.58) + lookAheadBias;
   if (kart.onGrass) lookAhead = Math.min(lookAhead, 11);
 
-  const aim = track.posAt(s + lookAhead, kart.aiLaneCurrent);
+  const aimLane = kart.aiRouteIntent && routeId === null ? 0 : kart.aiLaneCurrent;
+  let aim = null;
+  if (kart.aiRouteIntent && routeId === null) {
+    const branch = track.routesById?.get(kart.aiRouteIntent);
+    if (branch) aim = track.posAt(branch.enterS + 16, 0, branch.id);
+  }
+  if (!aim) aim = track.posAt(s + lookAhead, aimLane, navRouteId);
   const dx = aim.x - kart.position.x;
   const dz = aim.z - kart.position.z;
   const desiredHeading = Math.atan2(dx, dz);

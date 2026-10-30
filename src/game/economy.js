@@ -1,17 +1,29 @@
 // Progreso del jugador: monedas, karts y circuitos desbloqueados.
 //
-// Todo vive en localStorage bajo una única clave nueva. Las claves antiguas
-// (`turbo-circuit-kart-v1` y `turbo-circuit-map-v1`) solo se leen una vez para
-// migrar la selección: nunca se sobrescriben ni se borran.
+// Todo vive en localStorage bajo una única clave (`turbo-circuit-progress-v1`).
+// Las claves antiguas (`turbo-circuit-kart-v1` y `turbo-circuit-map-v1`) NO se
+// usan para conceder desbloqueos: la versión anterior a la economía no tenía
+// compras, así que no hay ninguna compra legítima que migrar desde ellas. Solo
+// se conservan los desbloqueos que ya estén dentro del perfil v1. Las claves
+// antiguas no se leen, no se sobrescriben y no se borran.
+//
+// Un perfil v1 solo puede contener como compra legítima un objeto cuyo precio
+// no supere `stats.coinsEarned` (las monedas solo entran ganando carreras y ese
+// contador es acumulativo). Si un perfil antiguo trae un objeto más caro que
+// todo lo ganado, ese desbloqueo vino de la migración antigua —que confundía
+// el mapa seleccionado con un mapa comprado— y se retira al sanear.
 //
 // Reglas de economía (centralizadas aquí, no repartidas por la interfaz):
 //   • Solo se gana dinero al quedar primero.
 //   • Una carrera paga una sola vez: Game marca la recompensa como cobrada.
+//   • Ningún saldo puede quedar negativo ni contener NaN.
 //   • No hay cuentas, servidores ni pagos: todo es local.
-import { DEFAULT_KART, getKart, isKart, loadKartId } from './karts.js';
-import { DEFAULT_MAP, getMap, isMap, loadMapId } from './maps.js';
+import { DEFAULT_KART, KART_ORDER, isKart } from './karts.js';
+import { DEFAULT_MAP, MAP_ORDER, isMap } from './maps.js';
 
 export const PROGRESS_KEY = 'turbo-circuit-progress-v1';
+/** Copia de seguridad del texto corrupto antes de reparar el perfil. */
+export const CORRUPT_BACKUP_KEY = 'turbo-circuit-progress-v1.corrupt';
 export const PROGRESS_VERSION = 1;
 
 /** Monedas por victoria según dificultad. */
@@ -69,89 +81,106 @@ function cleanCoins(value) {
   return Math.max(0, Math.min(MAX_COINS, Math.floor(number)));
 }
 
-function uniqueValid(list, predicate) {
-  if (!Array.isArray(list)) return [];
-  const seen = new Set();
-  for (const id of list) {
-    if (typeof id === 'string' && predicate(id)) seen.add(id);
+function cleanCount(value) {
+  return Math.max(0, Math.floor(Number(value) || 0));
+}
+
+/**
+ * Deja solo identificadores válidos, sin duplicados y en el orden canónico.
+ * Añade siempre el contenido de serie: Rayo y Costa no pueden perderse.
+ */
+function ownedList(list, order, starters) {
+  const owned = new Set();
+  if (Array.isArray(list)) {
+    for (const id of list) {
+      if (typeof id === 'string' && order.includes(id)) owned.add(id);
+    }
   }
-  return [...seen];
+  for (const id of starters) owned.add(id);
+  return order.filter((id) => owned.has(id));
 }
 
 /**
  * Convierte cualquier dato guardado en un perfil válido. Si algo no cuadra se
- * repara en lugar de descartar la partida: el jugador nunca pierde monedas por
- * un campo corrupto.
+ * repara campo a campo en lugar de descartar la partida: el jugador conserva
+ * sus monedas y sus compras, y como mínimo mantiene Rayo, Costa y saldo ≥ 0.
+ * Nunca concede desbloqueos que no estén ya en el perfil.
  */
-export function sanitizeProgress(raw, legacy = {}) {
+export function sanitizeProgress(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return createNewProgress();
+
   const profile = createNewProgress();
-  if (!raw || typeof raw !== 'object') {
-    return applyLegacy(profile, legacy);
+  profile.coins = cleanCoins(raw.coins);
+  profile.karts = ownedList(raw.karts, KART_ORDER, STARTING_KARTS);
+  profile.maps = ownedList(raw.maps, MAP_ORDER, STARTING_MAPS);
+
+  const stats = raw.stats && typeof raw.stats === 'object' && !Array.isArray(raw.stats)
+    ? raw.stats
+    : null;
+  const earnedRaw = stats ? Number(stats.coinsEarned) : Number.NaN;
+  // Solo se usa como prueba de compra si el perfil trae el contador. Si falta
+  // o está dañado se conservan los desbloqueos para no borrar compras reales.
+  const hasEarnedEvidence = Number.isFinite(earnedRaw) && earnedRaw >= 0;
+  if (hasEarnedEvidence) {
+    const earned = cleanCount(earnedRaw);
+    profile.karts = profile.karts.filter((id) => (KART_PRICES[id] ?? 0) <= earned);
+    profile.maps = profile.maps.filter((id) => (MAP_PRICES[id] ?? 0) <= earned);
   }
 
-  profile.coins = cleanCoins(raw.coins);
-  profile.karts = uniqueValid(raw.karts, isKart);
-  profile.maps = uniqueValid(raw.maps, isMap);
-
-  // Los desbloqueos de serie nunca se pierden.
-  for (const id of STARTING_KARTS) if (!profile.karts.includes(id)) profile.karts.push(id);
-  for (const id of STARTING_MAPS) if (!profile.maps.includes(id)) profile.maps.push(id);
-
-  const stats = raw.stats && typeof raw.stats === 'object' ? raw.stats : {};
   profile.stats = {
-    races: Math.max(0, Math.floor(Number(stats.races) || 0)),
-    wins: Math.max(0, Math.floor(Number(stats.wins) || 0)),
-    coinsEarned: Math.max(0, Math.floor(Number(stats.coinsEarned) || 0)),
+    races: cleanCount(stats?.races),
+    wins: cleanCount(stats?.wins),
+    coinsEarned: cleanCount(stats?.coinsEarned),
   };
 
   const kart = typeof raw.selectedKart === 'string' ? raw.selectedKart : null;
-  profile.selectedKart = kart && profile.karts.includes(kart) ? kart : profile.karts[0];
+  profile.selectedKart =
+    kart && profile.karts.includes(kart) ? kart : DEFAULT_KART;
   const map = typeof raw.selectedMap === 'string' ? raw.selectedMap : null;
-  profile.selectedMap = map && profile.maps.includes(map) ? map : profile.maps[0];
+  profile.selectedMap = map && profile.maps.includes(map) ? map : DEFAULT_MAP;
 
-  return applyLegacy(profile, legacy, false);
-}
-
-/**
- * Migración desde las claves antiguas. Si el jugador tenía elegido un kart o un
- * circuito que ahora cuesta monedas, se le regala el desbloqueo: es la
- * compensación documentada para no romper su partida anterior. Las monedas
- * empiezan en 0.
- */
-function applyLegacy(profile, legacy, preferLegacy = true) {
-  if (legacy.kart && isKart(legacy.kart)) {
-    if (!profile.karts.includes(legacy.kart)) profile.karts.push(legacy.kart);
-    if (preferLegacy || !profile.selectedKart) profile.selectedKart = legacy.kart;
-  }
-  if (legacy.map && isMap(legacy.map)) {
-    if (!profile.maps.includes(legacy.map)) profile.maps.push(legacy.map);
-    if (preferLegacy || !profile.selectedMap) profile.selectedMap = legacy.map;
-  }
-  if (!profile.karts.includes(profile.selectedKart)) profile.selectedKart = profile.karts[0];
-  if (!profile.maps.includes(profile.selectedMap)) profile.selectedMap = profile.maps[0];
   return profile;
 }
 
-/** Lee el perfil guardado, migrando las claves antiguas si hace falta. */
+/** Guarda una copia del texto corrupto antes de reparar el perfil. */
+function backupCorrupt(target, text) {
+  if (!target || typeof text !== 'string' || !text) return;
+  try {
+    target.setItem(CORRUPT_BACKUP_KEY, text);
+  } catch {
+    // Si tampoco se puede escribir la copia, no se bloquea el arranque.
+  }
+}
+
+/**
+ * Lee el perfil guardado. Si el JSON está dañado, guarda una copia del texto
+ * original en `turbo-circuit-progress-v1.corrupt` y devuelve un perfil seguro.
+ * No escribe nada por su cuenta: el guardado solo ocurre cuando el jugador
+ * compra, equipa o termina una carrera.
+ */
 export function loadProgress(storage = null) {
   const target = resolveStorage(storage);
-  const legacy = {};
+  if (!target) return createNewProgress();
+
+  let text = null;
   try {
-    legacy.kart = loadKartId(target);
-    legacy.map = loadMapId(target);
+    text = target.getItem(PROGRESS_KEY);
   } catch {
-    // Sin acceso a las claves antiguas se sigue con los valores por defecto.
+    return createNewProgress();
   }
-  if (!target) return sanitizeProgress(null, legacy);
+  if (!text) return createNewProgress();
 
   let raw = null;
   try {
-    const text = target.getItem(PROGRESS_KEY);
-    if (text) raw = JSON.parse(text);
+    raw = JSON.parse(text);
   } catch {
     raw = null;
   }
-  return sanitizeProgress(raw, legacy);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    backupCorrupt(target, text);
+    return createNewProgress();
+  }
+  return sanitizeProgress(raw);
 }
 
 /** Guarda el perfil. Devuelve false si el navegador no deja escribir. */
@@ -174,6 +203,15 @@ export function ownsMap(progress, id) {
   return Boolean(progress?.maps?.includes(id));
 }
 
+/**
+ * Comprobación única para arrancar una carrera: el kart y el circuito deben
+ * estar comprados en el perfil. No basta con que sean los ids seleccionados ni
+ * con que existan en la lista de contenido.
+ */
+export function ownsLoadout(progress, kartId, mapId) {
+  return ownsKart(progress, kartId) && ownsMap(progress, mapId);
+}
+
 export function coinsFor(difficulty) {
   return REWARDS[difficulty] ?? 0;
 }
@@ -186,6 +224,21 @@ export function mapPrice(id) {
   return MAP_PRICES[id] ?? 0;
 }
 
+/** Precio de un objeto válido; 0 si no existe. */
+export function priceOf(kind, id) {
+  if (kind === 'kart') return isKart(id) ? kartPrice(id) : 0;
+  if (kind === 'map') return isMap(id) ? mapPrice(id) : 0;
+  return 0;
+}
+
+/** Monedas que faltan para comprar un objeto (0 si ya se tiene). */
+export function missingCoins(progress, kind, id) {
+  const owned = kind === 'kart' ? ownsKart(progress, id) : ownsMap(progress, id);
+  if (owned) return 0;
+  const price = priceOf(kind, id);
+  return Math.max(0, price - cleanCoins(progress?.coins));
+}
+
 /** Victorias (en esa dificultad) que cuestan un objeto. Sirve para orientar. */
 export function winsNeeded(price, difficulty) {
   const reward = coinsFor(difficulty);
@@ -195,46 +248,68 @@ export function winsNeeded(price, difficulty) {
 
 /**
  * Compra un kart o un circuito. Devuelve un motivo legible cuando falla para
- * que la interfaz pueda explicarlo sin inventarse el resultado.
+ * que la interfaz pueda explicarlo sin inventarse el resultado. La operación
+ * se aplica una sola vez: si ya está comprado, no vuelve a cobrar.
  */
 export function purchase(progress, kind, id) {
-  if (!progress) return { ok: false, reason: 'No hay partida guardada.' };
-  const isKartKind = kind === 'kart';
-  const valid = isKartKind ? isKart(id) : isMap(id);
-  if (!valid) return { ok: false, reason: 'Ese objeto no existe.' };
-
-  const owned = isKartKind ? progress.karts : progress.maps;
-  if (owned.includes(id)) return { ok: false, reason: 'Ya lo tienes desbloqueado.' };
-
-  const price = isKartKind ? kartPrice(id) : mapPrice(id);
-  if (progress.coins < price) {
-    return { ok: false, reason: `Te faltan ${price - progress.coins} monedas.` };
+  if (!progress || typeof progress !== 'object') {
+    return { ok: false, code: 'no-progress', reason: 'No hay partida guardada.' };
+  }
+  if (kind !== 'kart' && kind !== 'map') {
+    return { ok: false, code: 'bad-kind', reason: 'Ese tipo de objeto no existe.' };
+  }
+  const valid = kind === 'kart' ? isKart(id) : isMap(id);
+  if (!valid) {
+    return { ok: false, code: 'unknown', reason: 'Ese objeto no existe.' };
   }
 
-  progress.coins -= price;
+  const owned = kind === 'kart' ? progress.karts : progress.maps;
+  if (!Array.isArray(owned)) {
+    return { ok: false, code: 'bad-profile', reason: 'El perfil guardado no es válido.' };
+  }
+  if (owned.includes(id)) {
+    return { ok: false, code: 'owned', reason: 'Ya lo tienes desbloqueado.' };
+  }
+
+  const price = priceOf(kind, id);
+  const coins = cleanCoins(progress.coins);
+  if (coins < price) {
+    const missing = price - coins;
+    return {
+      ok: false,
+      code: 'insufficient',
+      missing,
+      reason: `Te faltan ${missing} monedas.`,
+    };
+  }
+
+  progress.coins = coins - price;
   owned.push(id);
-  return { ok: true, price, coins: progress.coins };
+  return { ok: true, code: 'purchased', price, coins: progress.coins, missing: 0 };
 }
 
 /** Selecciona contenido ya desbloqueado; si no lo está, no cambia nada. */
 export function selectKart(progress, id) {
-  if (!progress || !isKart(id) || !progress.karts.includes(id)) return false;
+  if (!progress || !isKart(id) || !progress.karts?.includes(id)) return false;
   progress.selectedKart = id;
   return true;
 }
 
 export function selectMap(progress, id) {
-  if (!progress || !isMap(id) || !progress.maps.includes(id)) return false;
+  if (!progress || !isMap(id) || !progress.maps?.includes(id)) return false;
   progress.selectedMap = id;
   return true;
 }
 
 /** Suma una recompensa validada. No permite saldos negativos ni NaN. */
 export function grantCoins(progress, amount) {
-  if (!progress) return 0;
+  if (!progress || typeof progress !== 'object') return 0;
   const value = cleanCoins(amount);
-  progress.coins = cleanCoins(progress.coins + value);
-  progress.stats.coinsEarned += value;
+  progress.coins = cleanCoins(cleanCoins(progress.coins) + value);
+  if (!progress.stats || typeof progress.stats !== 'object') {
+    progress.stats = { races: 0, wins: 0, coinsEarned: 0 };
+  }
+  progress.stats.coinsEarned = cleanCount(progress.stats.coinsEarned) + value;
   return value;
 }
 
@@ -255,5 +330,3 @@ export function priceHint(price) {
   const hard = winsNeeded(price, 'hard');
   return `${easy} victorias en fácil · ${normal} en normal · ${hard} en difícil`;
 }
-
-export { getKart, getMap };
