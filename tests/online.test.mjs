@@ -225,9 +225,14 @@ test('salas: crear, unirse, límites, anfitrión y mensajes de no miembros', asy
   box.z = stateA.z;
   box.routeId = null;
   box.active = true;
+  const announcedItem = start.boxes[0].itemId;
+  const awardForB = once(b, 'item:award', (payload) => payload.playerId === created.youId);
   const claimA = await ack(a, 'item:claim', { boxIndex: 0 });
+  const awarded = await awardForB;
   assert.equal(claimA.ok, true);
-  assert.ok(claimA.itemId);
+  assert.equal(claimA.itemId, announcedItem, 'el objeto entregado debe ser el anunciado');
+  assert.equal(awarded.itemId, announcedItem, 'el HUD recibe el mismo objeto que la caja');
+  assert.equal(room.race.players.get(created.youId).item, announcedItem);
   const claimAAgain = await ack(a, 'item:claim', { boxIndex: 0 });
   assert.equal(claimAAgain.ok, false);
   assert.equal(claimAAgain.error, 'inactive');
@@ -244,9 +249,17 @@ test('salas: crear, unirse, límites, anfitrión y mensajes de no miembros', asy
   assert.equal(claimB.error, 'inactive');
 
   // El objeto concedido se puede usar una vez y queda validado por el servidor.
+  // El evento visual llega tanto al jugador que lo activa como al resto: es lo
+  // que dispara la onda del PULSO en cada cliente.
+  const useForA = once(a, 'item:use', (payload) => payload.playerId === created.youId);
+  const useForB = once(b, 'item:use', (payload) => payload.playerId === created.youId);
   const use = await ack(a, 'item:use', { itemId: claimA.itemId });
+  const [useEventA, useEventB] = await Promise.all([useForA, useForB]);
   assert.equal(use.ok, true);
   assert.equal(use.itemId, claimA.itemId);
+  assert.equal(useEventA.itemId, claimA.itemId);
+  assert.equal(useEventB.itemId, claimA.itemId);
+  assert.deepEqual(useEventA.targets, useEventB.targets);
   const useAgain = await ack(a, 'item:use', { itemId: claimA.itemId });
   assert.equal(useAgain.ok, false);
   assert.equal(useAgain.error, 'no-item');
@@ -382,25 +395,32 @@ test('autoridad: checkpoints, meta, teletransportes y objetos', () => {
   box.z = itemPlayer.last.z;
   box.routeId = null;
   box.active = true;
+  // Aunque el generador aleatorio devuelva IMPULSO, la concesión debe respetar
+  // el objeto que la caja ya mostraba al jugador (BARRERA).
+  box.itemId = 'BARRERA';
   const first = itemRace.claimBox('p1', 0, clock);
   assert.equal(first.ok, true);
-  assert.equal(first.itemId, 'IMPULSO');
+  assert.equal(first.itemId, box.itemId);
+  assert.equal(first.itemId, 'BARRERA');
+  assert.equal(itemPlayer.item, first.itemId);
   const second = itemRace.claimBox('p1', 0, clock + 10);
   assert.equal(second.ok, false);
   assert.equal(second.reason, 'inactive');
 
   // Uso validado y cooldown.
-  const used = itemRace.useItem('p1', 'IMPULSO', clock + 800);
+  const used = itemRace.useItem('p1', first.itemId, clock + 800);
   assert.equal(used.ok, true);
   assert.deepEqual(used.targets, []);
-  const usedAgain = itemRace.useItem('p1', 'IMPULSO', clock + 900);
+  const usedAgain = itemRace.useItem('p1', first.itemId, clock + 900);
   assert.equal(usedAgain.ok, false);
   assert.equal(usedAgain.reason, 'no-item');
 
-  // Una caja reaparece pasado el tiempo y recibe un objeto.
+  // Una caja reaparece pasado el tiempo, recibe un objeto nuevo y lo anuncia
+  // con el mismo id que queda activo en el servidor.
   const tick = itemRace.tick(clock + 5000);
   assert.equal(tick.respawned.length, 1);
   assert.equal(itemRace.boxes[0].active, true);
+  assert.equal(tick.respawned[0].itemId, itemRace.boxes[0].itemId);
 });
 
 test('autoridad: BARRERA y PULSO online, y objetos fuera del pool rechazados', () => {

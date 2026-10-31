@@ -1,6 +1,8 @@
 // Entrada de teclado y pantalla táctil.
 // El teclado sigue funcionando en ordenador y los controles táctiles usan
 // Pointer Events para permitir varios dedos a la vez (girar + acelerar, etc.).
+import { isTextEntryTarget } from './keyboard.js';
+
 const MOVE_KEYS = new Set([
   'KeyW',
   'KeyA',
@@ -36,6 +38,9 @@ export class Input {
     this.touchBound = false;
 
     this.handleKeyDown = (event) => {
+      // Mientras se escribe en un campo de texto, el juego no captura nada:
+      // ni movimiento, ni pausa, ni objetos. Así W/A/S/D/E llegan al campo.
+      if (isTextEntryTarget(event.target)) return;
       if (MOVE_KEYS.has(event.code) || event.code === DRIFT_KEY) {
         // Evita el desplazamiento de la página y que ESPACIO pulse un botón.
         event.preventDefault();
@@ -47,6 +52,7 @@ export class Input {
     };
 
     this.handleKeyUp = (event) => {
+      if (isTextEntryTarget(event.target)) return;
       if (MOVE_KEYS.has(event.code) || event.code === DRIFT_KEY) {
         event.preventDefault();
         this.keys.delete(event.code);
@@ -55,9 +61,16 @@ export class Input {
 
     this.handleBlur = () => this.clear();
 
+    // Si el foco entra en un campo con una tecla de conducción pulsada, se
+    // libera para que no quede acelerando al volver al juego.
+    this.handleFocusIn = (event) => {
+      if (isTextEntryTarget(event.target)) this.clear();
+    };
+
     window.addEventListener('keydown', this.handleKeyDown);
     window.addEventListener('keyup', this.handleKeyUp);
     window.addEventListener('blur', this.handleBlur);
+    window.addEventListener('focusin', this.handleFocusIn);
     this.bindTouchControls();
   }
 
@@ -181,6 +194,7 @@ export class Input {
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
     window.removeEventListener('blur', this.handleBlur);
+    window.removeEventListener('focusin', this.handleFocusIn);
 
     for (const entry of this.touchButtons) {
       entry.button.removeEventListener('pointerdown', entry.onDown);

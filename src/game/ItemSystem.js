@@ -1548,11 +1548,14 @@ export class ItemSystem {
   }
 
   spawnWave(kart) {
+    // La onda debe quedar justo sobre el asfalto. Con una altura fija quedaría
+    // enterrada en las zonas elevadas de la pista y no se vería.
+    const groundY = Number.isFinite(kart?.groundY) ? kart.groundY : (kart?.position?.y ?? 0);
     this.spawnWaveAt(kart.position.x, kart.position.z, {
       color: 0x5fe6ff,
       radius: ITEMS.PULSO.radius,
       duration: 0.65,
-      y: 0.14,
+      y: groundY + 0.14,
     });
   }
 

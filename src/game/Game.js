@@ -7,6 +7,7 @@ import { DIFFICULTIES, isDifficulty, loadDifficulty, saveDifficulty } from './di
 import { Effects } from './Effects.js';
 import { Input } from './Input.js';
 import { ItemSystem } from './ItemSystem.js';
+import { isTextEntryTarget } from './keyboard.js';
 import { ITEMS } from './items.js';
 import { AI_KARTS, DEFAULT_KART, PLAYER_KARTS, getKart } from './karts.js';
 import { Kart } from './Kart.js';
@@ -455,6 +456,9 @@ export class Game {
 
     this.input.onAction = (code, event) => {
       if (event.repeat) return;
+      // Nunca se ejecutan atajos del juego mientras se escribe un nombre,
+      // un código de sala o cualquier otro campo de texto.
+      if (isTextEntryTarget(event.target)) return;
       // Con la tienda abierta el teclado no puede arrancar la carrera.
       if (this.shop?.isOpen) {
         if (code === 'Escape') {

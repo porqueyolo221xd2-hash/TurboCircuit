@@ -309,7 +309,10 @@ export class RaceAuthority {
       return { ok: false, reason: 'distance' };
     }
 
-    p.item = weightedOnlineItem(this.random);
+    // El objeto entregado debe ser exactamente el que la caja anuncia en el
+    // cliente. Se decide al crear/reaparecer la caja y no se vuelve a sortear
+    // al recogerla: de lo contrario el icono visible y el HUD no coinciden.
+    p.item = isValidItem(box.itemId) ? box.itemId : weightedOnlineItem(this.random);
     p.lastPickupAt = now;
     box.active = false;
     box.respawnAt = now + BOX_RESPAWN_MS;
